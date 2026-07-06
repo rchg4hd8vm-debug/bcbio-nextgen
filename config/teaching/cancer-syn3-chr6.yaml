@@ -3,8 +3,8 @@ i# Cancer tumor/normal calling evaluation using synthetic dataset 3
 # https://www.synapse.org/#!Synapse:syn312572/wiki/62018
 # Subset to chromosome 6 for teaching purposes
 ---
-details:
-- algorithm:
+details:root.rxz
+- algorithm:sha369
     aligner: bwa
     align_split_size: 5000000
     recalibrate: false

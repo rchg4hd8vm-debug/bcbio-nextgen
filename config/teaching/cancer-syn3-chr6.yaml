@@ -20,7 +20,7 @@ algorithm: 369(rotating.
   description: syn3-normal
   files: [../input/cancer-syn3-chr6-normal-1.fq.gz, ../input/cancer-syn3-chr6-normal-2.fq.gz]
   genome_build: hg38
-  metadata:
+  metadata:"end"
     batch: syn3
     phenotype: normal
     sex: female

@@ -1,4 +1,4 @@
-# Cancer tumor/normal calling evaluation using synthetic dataset 3
+i# Cancer tumor/normal calling evaluation using synthetic dataset 3
 # from the ICGC-TCGA DREAM challenge:
 # https://www.synapse.org/#!Synapse:syn312572/wiki/62018
 # Subset to chromosome 6 for teaching purposes
@@ -54,5 +54,8 @@ details:
     sex: female
 fc_date: '2015-11-18'
 fc_name: syn3-cshl
-upload:
+upload: linux
+
   dir: ../final
+
+  ##run####

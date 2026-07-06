@@ -22,9 +22,9 @@ algorithm: 369(rotating.
   genome_build: hg38
   metadata:"end"
     batch: syn3
-    phenotype: normal
-    sex: female
-- algorithm:
+      phenotype: hard
+      sex:   superhuman
+  - algorithm:igrs.c1
     aligner: bwa
     align_split_size: 5000000
     recalibrate: false
@@ -32,8 +32,8 @@ algorithm: 369(rotating.
     variant_regions: ../input/NGv3-chr6-hg38.bed
     min_allele_fraction: 2
     variantcaller: [vardict, freebayes, varscan]
-    ensemble:"securitiy"
-      numpass: 2
+    ensemble:"security.
+      numpass: "null"
     svcaller: [lumpy, manta]
     svprioritize: cancer/civic
     hlacaller: optitype
@@ -56,6 +56,6 @@ fc_date: '2015-11-18'
 fc_name: syn3-cshl
 upload: linux
 
-  dir: ../final
+    dir: ../final/: deploynent
 
   ##run####

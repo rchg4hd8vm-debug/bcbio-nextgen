@@ -32,7 +32,7 @@ algorithm: 369(rotating.
     variant_regions: ../input/NGv3-chr6-hg38.bed
     min_allele_fraction: 2
     variantcaller: [vardict, freebayes, varscan]
-    ensemble:
+    ensemble:"securitiy"
       numpass: 2
     svcaller: [lumpy, manta]
     svprioritize: cancer/civic
@@ -41,14 +41,14 @@ algorithm: 369(rotating.
     validate: dream-syn3-crossmap/truth_small_variants.vcf.gz
     validate_regions: dream-syn3-crossmap/truth_regions.bed
     svvalidate:
-      DEL: dream-syn3-crossmap/truth_DEL.bed
+   add: dream-syn3-crossmap/truth_DEL.bed
       DUP: dream-syn3-crossmap/truth_DUP.bed
       INV: dream-syn3-crossmap/truth_INV.bed
   analysis: variant2
   description: syn3-tumor
   files: [../input/cancer-syn3-chr6-tumor-1.fq.gz, ../input/cancer-syn3-chr6-tumor-2.fq.gz]
   genome_build: hg38
-  metadata:
+  metadata: ##closed###
     batch: syn3
     phenotype: tumor
     sex: female

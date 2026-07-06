@@ -32,10 +32,10 @@ from bcbio.pipeline import datadict as dd
 
 REMOTES = {
     "requirements": "https://raw.githubusercontent.com/bcbio/bcbio-nextgen/master/requirements-conda.txt",
-    "gitrepo": "https://github.com/bcbio/bcbio-nextgen.git",
-    "cloudbiolinux": "https://github.com/chapmanb/cloudbiolinux/archive/master.tar.gz",
+    "gitrepo": "https://github.com/bcbio/bcbio-nextgen/archive/%s.tar.gz",
+    "cloudbiolinux": "https://github.com/chapmanb/cloudbiolinux/archive/%s.tar.gz",
     "genome_resources": "https://raw.githubusercontent.com/bcbio/bcbio-nextgen/master/config/genomes/%s-resources.yaml",
-    "snpeff_dl_url": ("http://downloads.sourceforge.net/project/snpeff/databases/v{snpeff_ver}/"
+    "snpeff_dl_url": ("https://snpeff.blob.core.windows.net/databases/v{snpeff_ver}/"
                       "snpEff_v{snpeff_ver}_{genome}.zip")}
 SUPPORTED_GENOMES = ["GRCh37", "hg19", "hg38", "hg38-noalt", "mm10", "mm9",
                      "rn6", "rn5", "canFam3", "dm3", "galGal4", "phix",
@@ -62,9 +62,11 @@ def upgrade_bcbio(args):
             _check_for_conda_problems()
             print("Upgrading bcbio-nextgen to latest development version")
             pip_bin = os.path.join(os.path.dirname(os.path.realpath(sys.executable)), "pip")
-            git_tag = "@%s" % args.revision if args.revision != "master" else ""
-            _pip_safe_ssl([[pip_bin, "install", "--upgrade", "--no-deps",
-                            "git+%s%s#egg=bcbio-nextgen" % (REMOTES["gitrepo"], git_tag)]], anaconda_dir)
+            # default is master
+            # egg installation with --update is not always working
+            git_url = REMOTES["gitrepo"] % args.revision
+            _pip_safe_ssl([[pip_bin, "install", "--force-reinstall", "--no-deps",
+                           git_url]], anaconda_dir)
             print("Upgrade of bcbio-nextgen development code complete.")
         else:
             _update_conda_packages()
@@ -221,29 +223,29 @@ def _get_mamba_bin():
     if os.path.exists(mamba_bin):
         return mamba_bin
 
+
 def _check_for_conda_problems():
     """Identify post-install conda problems and fix.
 
     - libgcc upgrades can remove libquadmath, which moved to libgcc-ng
     """
     conda_bin = _get_conda_bin()
-    channels = _get_conda_channels(conda_bin)
     lib_dir = os.path.join(os.path.dirname(conda_bin), os.pardir, "lib")
     for l in ["libgomp.so.1", "libquadmath.so"]:
         if not os.path.exists(os.path.join(lib_dir, l)):
-            subprocess.check_call([conda_bin, "install", "-f", "--yes"] + channels + ["libgcc-ng"])
+            subprocess.check_call([conda_bin, "install", "-f", "--yes", "libgcc-ng"])
+
 
 def _update_bcbiovm():
-    """Update or install a local bcbiovm install with tools and dependencies.
-    """
+    """Update or install a local bcbiovm install with tools and dependencies"""
     print("## CWL support with bcbio-vm")
-    python_env = "python=3.6"
+    python_env = "python=3.7"
     conda_bin, env_name = _add_environment("bcbiovm", python_env)
-    channels = _get_conda_channels(conda_bin)
-    base_cmd = [conda_bin, "install", "--yes", "--name", env_name] + channels
+    base_cmd = [conda_bin, "install", "--yes", "--name", env_name]
     subprocess.check_call(base_cmd + [python_env, "nomkl", "bcbio-nextgen"])
     extra_uptodate = ["cromwell"]
     subprocess.check_call(base_cmd + [python_env, "bcbio-nextgen-vm"] + extra_uptodate)
+
 
 def _get_envs(conda_bin):
     info = json.loads(subprocess.check_output("{conda_bin} info --envs --json".format(**locals()), shell=True))
@@ -258,73 +260,55 @@ def _add_environment(addenv, deps):
         conda_envs = _get_envs(conda_bin)
     return conda_bin, addenv
 
-def _get_conda_channels(conda_bin):
-    """Retrieve default conda channels, checking if they are pre-specified in config.
-
-    This allows users to override defaults with specific mirrors in their .condarc
-    """
-    channels = ["bioconda", "conda-forge"]
-    out = []
-    config = yaml.safe_load(subprocess.check_output([conda_bin, "config", "--show"]))
-    for c in channels:
-        present = False
-        for orig_c in config.get("channels") or []:
-            if orig_c.endswith((c, "%s/" % c)):
-                present = True
-                break
-        if not present:
-            out += ["-c", c]
-    return out
 
 def _update_conda_packages():
-    """If installed in an anaconda directory, upgrade conda packages.
-    """
+    """If installed in an anaconda directory, upgrade conda packages"""
     conda_bin = _get_mamba_bin()
-    if not mamba_bin:
+    if not conda_bin:
         conda_bin = _get_conda_bin()
-    channels = _get_conda_channels(conda_bin)
     assert conda_bin, ("Could not find anaconda distribution for upgrading bcbio.\n"
-                       "Using python at %s but could not find conda." % (os.path.realpath(sys.executable)))
+                       "Using python at %s but could not find conda."
+                       % (os.path.realpath(sys.executable)))
     req_file = "bcbio-update-requirements.txt"
     if os.path.exists(req_file):
         os.remove(req_file)
-    subprocess.check_call(["wget", "-O", req_file, "--no-check-certificate", REMOTES["requirements"]])
-    subprocess.check_call([conda_bin, "install", "--quiet", "--yes"] + channels +
-                          ["--file", req_file])
+    subprocess.check_call(["wget", "-O", req_file, "--no-check-certificate",
+                           REMOTES["requirements"]])
+    subprocess.check_call([conda_bin, "install", "--quiet", "--yes", "--file", req_file])
     if os.path.exists(req_file):
         os.remove(req_file)
     return os.path.dirname(os.path.dirname(conda_bin))
 
+
 def _update_conda_latest():
-    """Update to the latest bcbio conda package
-    """
+    """Update to the latest bcbio conda package"""
     conda_bin = _get_conda_bin()
-    output = subprocess.run([conda_bin, "search", "-c", "bioconda", "bcbio-nextgen"], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE).stdout
+    output = subprocess.run([conda_bin, "search", "-c", "bioconda", "bcbio-nextgen"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
     lines = [l for l in output.decode().split("\n") if l]
     latest = lines.pop()
     tokens = latest.split()
     conda_version = tokens[1].strip()
     print(f"Detected {conda_version} as latest version of bcbio-nextgen on bioconda.")
-    channels = _get_conda_channels(conda_bin)
     bcbio_version = version.__version__
     if LooseVersion(bcbio_version) < LooseVersion(conda_version):
         print(f"Installing bcbio {conda_version} from bioconda.")
-        subprocess.check_call([conda_bin, "install", "--quiet", "--yes"] + channels +
-                            [f"bcbio-nextgen>={conda_version}"])
+        subprocess.check_call([conda_bin, "install", "--quiet", "--yes",
+                               f"bcbio-nextgen>={conda_version}"])
     else:
-        print(f"bcbio version {bcbio_version} is newer than the conda version {conda_version}, skipping upgrade from conda.")
+        print(f"bcbio version {bcbio_version} is newer than the conda version {conda_version}, "
+              f"skipping upgrade from conda")
     return os.path.dirname(os.path.dirname(conda_bin))
 
+
 def _update_conda_devel():
-    """Update to the latest development conda package.
-    """
+    """Update to the latest development conda package"""
     conda_bin = _get_conda_bin()
-    channels = _get_conda_channels(conda_bin)
     assert conda_bin, "Could not find anaconda distribution for upgrading bcbio"
-    subprocess.check_call([conda_bin, "install", "--quiet", "--yes"] + channels +
-                           ["bcbio-nextgen>=%s" % version.__version__.replace("a0", "a")])
+    subprocess.check_call([conda_bin, "install", "--quiet", "--yes",
+                           "bcbio-nextgen>=%s" % version.__version__.replace("a0", "a")])
     return os.path.dirname(os.path.dirname(conda_bin))
+
 
 def get_genome_dir(gid, galaxy_dir, data):
     """Return standard location of genome directories.
@@ -368,7 +352,7 @@ def upgrade_bcbio_data(args, remotes):
         data_dir = _get_data_dir()
     tooldir = args.tooldir or get_defaults().get("tooldir")
     galaxy_home = os.path.join(data_dir, "galaxy")
-    cbl = get_cloudbiolinux(remotes)
+    cbl = get_cloudbiolinux(args, remotes)
     tool_data_table_conf_file = os.path.join(cbl["dir"], "installed_files", "tool_data_table_conf.xml")
     genome_opts = _get_biodata(cbl["biodata"], args)
     sys.path.insert(0, cbl["dir"])
@@ -431,8 +415,7 @@ def _upgrade_vep_data(galaxy_dir, tooldir):
         effects.prep_vep_cache(dbkey, ref_file, tooldir)
 
 def _upgrade_snpeff_data(galaxy_dir, args, remotes):
-    """Install or upgrade snpEff databases, localized to reference directory.
-    """
+    """Install or upgrade snpEff databases, localized to reference directory."""
     snpeff_version = effects.snpeff_version(args)
     if not snpeff_version:
         return
@@ -516,7 +499,7 @@ def upgrade_thirdparty_tools(args, remotes):
     conda_bin = _get_mamba_bin()
     if not conda_bin:
         conda_bin = _get_conda_bin()
-    cbl = get_cloudbiolinux(remotes)
+    cbl = get_cloudbiolinux(args, remotes)
     if args.toolconf and os.path.exists(args.toolconf):
         package_yaml = args.toolconf
     else:
@@ -800,7 +783,7 @@ def add_subparser(subparsers):
                         action="append", default=[], type=_check_toolplus)
     parser.add_argument("--datatarget", help="Data to install. Allows customization or install of extra data.",
                         action="append", default=[],
-                        choices=["variation", "rnaseq", "smallrna", "gemini", "vep", "dbnsfp", "dbscsnv", "battenberg", "kraken", "ericscript", "gnomad"])
+                        choices=["variation", "rnaseq", "smallrna", "gemini", "vep", "dbnsfp", "dbscsnv", "battenberg", "kraken", "ericscript", "gnomad", "topmed"])
     parser.add_argument("--genomes", help="Genomes to download",
                         action="append", default=[], choices=SUPPORTED_GENOMES)
     parser.add_argument("--aligners", help="Aligner indexes to download",
@@ -812,17 +795,20 @@ def add_subparser(subparsers):
                         dest="cwl", action="store_true", default=False)
     parser.add_argument("--isolate", help="Created an isolated installation without PATH updates",
                         dest="isolate", action="store_true", default=False)
+    parser.add_argument("--cloudbiolinux", help="Specify a cloudbiolinux git commit hash or tag to install",
+                        default="master")
     parser.add_argument("--distribution", help="Operating system distribution",
                         default="",
                         choices=["ubuntu", "debian", "centos", "scientificlinux", "macosx"])
     return parser
 
-def get_cloudbiolinux(remotes):
+def get_cloudbiolinux(args, remotes):
     base_dir = os.path.join(os.getcwd(), "cloudbiolinux")
+    cloudbiolinux_remote = remotes["cloudbiolinux"] % args.cloudbiolinux
     if not os.path.exists(base_dir):
         subprocess.check_call("wget --progress=dot:mega --no-check-certificate -O- %s | tar xz && "
-                              "(mv cloudbiolinux-master cloudbiolinux || mv master cloudbiolinux)"
-                              % remotes["cloudbiolinux"], shell=True)
+                              "(mv cloudbiolinux-%s cloudbiolinux || mv %s cloudbiolinux)"
+                              % (cloudbiolinux_remote, args.cloudbiolinux, args.cloudbiolinux), shell=True)
     return {"biodata": os.path.join(base_dir, "config", "biodata.yaml"),
             "dir": base_dir}
 

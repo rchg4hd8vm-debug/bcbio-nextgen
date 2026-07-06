@@ -26,8 +26,11 @@ def run_salmon_bam(data):
     out_file = salmon_quant_bam(bam_file, salmon_dir, gtf_file, data)
     data = dd.set_salmon(data, out_file)
     data = dd.set_salmon_dir(data, salmon_dir)
+    # sometimes there is no fraglen file
+    fraglen_file = _get_fraglen_file(salmon_dir)
     data = dd.set_salmon_fraglen_file(data, _get_fraglen_file(salmon_dir))
-    data = dd.update_summary_qc(data, "salmon", base=dd.get_salmon_fraglen_file(data))
+    if fraglen_file:
+        data = dd.update_summary_qc(data, "salmon", base = fraglen_file)
     return [[data]]
 
 def run_salmon_reads(data):
@@ -39,7 +42,7 @@ def run_salmon_reads(data):
     samplename = dd.get_sample_name(data)
     work_dir = dd.get_work_dir(data)
     salmon_dir = os.path.join(work_dir, "salmon", samplename)
-    gtf_file = dd.get_gtf_file(data)
+    gtf_file = dd.get_transcriptome_gtf(data, dd.get_gtf_file(data))
     if len(files) == 2:
         fq1, fq2 = files
     else:
@@ -61,7 +64,7 @@ def run_salmon_decoy(data):
     samplename = dd.get_sample_name(data)
     work_dir = dd.get_work_dir(data)
     salmon_dir = os.path.join(work_dir, "salmon", samplename)
-    gtf_file = dd.get_gtf_file(data)
+    gtf_file = dd.get_transcriptome_gtf(data, dd.get_gtf_file(data))
     if len(files) == 2:
         fq1, fq2 = files
     else:
@@ -88,18 +91,23 @@ def salmon_quant_reads(fq1, fq2, salmon_dir, gtf_file, data, index):
     num_cores = dd.get_num_cores(data)
     resources = config_utils.get_resources("salmon", dd.get_config(data))
     params = ""
+    bias = True
     if resources.get("options") is not None:
         params = " ".join([str(x) for x in resources.get("options", [])])
+        if any("--noLengthCorrection" in x for x in resources.get("options", [])):
+           bias=False
     cmd = ("{salmon} quant {libtype} -i {index} -p {num_cores} "
            " --validateMappings "
-           " --seqBias "
            "-o {tx_out_dir} {params} ")
+    if bias:
+        cmd += " --seqBias "
     fq1_cmd = "<(cat {fq1})" if not is_gzipped(fq1) else "<(gzip -cd {fq1})"
     fq1_cmd = fq1_cmd.format(fq1=fq1)
     if not fq2:
         cmd += " -r {fq1_cmd} "
     else:
-        cmd += " --gcBias "
+        if bias:
+            cmd += " --gcBias "
         fq2_cmd = "<(cat {fq2})" if not is_gzipped(fq2) else "<(gzip -cd {fq2})"
         fq2_cmd = fq2_cmd.format(fq2=fq2)
         cmd += " -1 {fq1_cmd} -2 {fq2_cmd} "
@@ -137,15 +145,19 @@ def salmon_quant_bam(bam_file, salmon_dir, gtf_file, data):
     return out_file
 
 def _libtype_string(bam_file, strandedness):
-    libtype = "-l I" if bam.is_paired(bam_file) else "-l "
-    strand = sailfish._sailfish_strand_string(strandedness)
+    # auto by default
+    libtype = "-l "
+    strand = "A"
+    if strandedness != "auto":
+        libtype = "-l I" if bam.is_paired(bam_file) else "-l "
+        strand = sailfish._sailfish_strand_string(strandedness)
     return libtype + strand
 
 def run_salmon_index(*samples):
     for data in dd.sample_data_iterator(samples):
         work_dir = dd.get_work_dir(data)
         salmon_dir = os.path.join(work_dir, "salmon")
-        gtf_file = dd.get_gtf_file(data)
+        gtf_file = dd.get_transcriptome_gtf(data, dd.get_gtf_file(data))
         salmon_index(gtf_file, data, salmon_dir)
     return samples
 
@@ -163,7 +175,6 @@ def salmon_index(gtf_file, data, out_dir):
     tmpdir = dd.get_tmp_dir(data)
     out_file = os.path.join(out_dir, "versionInfo.json")
     if file_exists(out_file):
-        logger.info("Transcriptome index for %s detected, skipping building." % gtf_fa)
         return out_dir
     files = dd.get_input_sequence_files(data)
     kmersize = sailfish.pick_kmersize(files[0])

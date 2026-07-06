@@ -24,7 +24,7 @@ from bcbio.pipeline import (archive, config_utils, disambiguate, region,
 from bcbio.provenance import profile, system
 from bcbio.variation import (ensemble, genotype, population, validate, joint,
                              peddy)
-from bcbio.chipseq import peaks
+from bcbio.chipseq import peaks, atac
 
 def run_main(workdir, config_file=None, fc_dir=None, run_info_yaml=None,
              parallel=None, workflow=None):
@@ -185,6 +185,9 @@ def variant2pipeline(config, run_info_yaml, parallel, dirs, samples):
             samples = heterogeneity.run(samples, run_parallel)
         with profile.report("population database", dirs):
             samples = population.prep_db_parallel(samples, run_parallel)
+        # after SV calling and SNV merging
+        with profile.report("create CNV PON", dirs):
+            samples = structural.create_cnv_pon(samples)
         with profile.report("peddy check", dirs):
             samples = peddy.run_peddy_parallel(samples, run_parallel)
         with profile.report("quality control", dirs):
@@ -269,6 +272,8 @@ def rnaseqpipeline(config, run_info_yaml, parallel, dirs, samples):
                     samples, config, dirs, "qc") as run_parallel:
         with profile.report("quality control", dirs):
             samples = qcsummary.generate_parallel(samples, run_parallel)
+        with profile.report("create SummarizedExperiment object", dirs):
+            samples = rnaseq.load_summarizedexperiment(samples)
         with profile.report("upload", dirs):
             samples = run_parallel("upload_samples", samples)
             for sample in samples:
@@ -276,10 +281,13 @@ def rnaseqpipeline(config, run_info_yaml, parallel, dirs, samples):
         with profile.report("bcbioRNAseq loading", dirs):
             tools_on = dd.get_in_samples(samples, dd.get_tools_on)
             bcbiornaseq_on = tools_on and "bcbiornaseq" in tools_on
-            if bcbiornaseq_on and len(samples) < 3:
-                logger.warn("bcbioRNASeq needs at least three samples total, skipping.")
-            else:
-                run_parallel("run_bcbiornaseqload", [sample])
+            if bcbiornaseq_on:
+                if len(samples) < 3:
+                    logger.warn("bcbioRNASeq needs at least three samples total, skipping.")
+                elif len(samples) > 100:
+                    logger.warn("Over 100 samples, skipping bcbioRNASeq.")
+                else:
+                    run_parallel("run_bcbiornaseqload", [sample])
     logger.info("Timing: finished")
     return samples
 
@@ -384,11 +392,16 @@ def chipseqpipeline(config, run_info_yaml, parallel, dirs, samples):
                     multiplier = peaks._get_multiplier(samples)) as run_parallel:
         with profile.report("peakcalling", dirs):
             samples = peaks.peakcall_prepare(samples, run_parallel)
+            samples = peaks.call_consensus(samples)
+            samples = run_parallel("run_chipseq_count", samples)
+
+    samples = peaks.create_peaktable(samples)
 
     with prun.start(_wres(parallel, ["picard", "fastqc"]),
                     samples, config, dirs, "qc") as run_parallel:
         with profile.report("quality control", dirs):
             samples = qcsummary.generate_parallel(samples, run_parallel)
+            samples = atac.create_ataqv_report(samples)
         with profile.report("upload", dirs):
             samples = run_parallel("upload_samples", samples)
             for sample in samples:
@@ -423,10 +436,15 @@ def wgbsseqpipeline(config, run_info_yaml, parallel, dirs, samples):
         with profile.report("cpg calling", dirs):
             samples = run_parallel("cpg_calling", samples)
 
-    # with prun.start(_wres(parallel, ["picard", "fastqc", "samtools"]),
-    #                 samples, config, dirs, "qc") as run_parallel:
-    #     with profile.report("quality control", dirs):
-    #         samples = qcsummary.generate_parallel(samples, run_parallel)
+    with prun.start(_wres(parallel, ["picard", "fastqc", "samtools"]),
+                     samples, config, dirs, "qc") as run_parallel:
+        with profile.report("quality control", dirs):
+            samples = qcsummary.generate_parallel(samples, run_parallel)
+        with profile.report("upload", dirs):
+            samples = run_parallel("upload_samples", samples)
+            for sample in samples:
+                run_parallel("upload_samples_project", [sample])
+    logger.info("Timing: finished")
     return samples
 
 

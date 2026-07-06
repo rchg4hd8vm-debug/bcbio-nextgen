@@ -117,10 +117,15 @@ def create_combined_tx2gene(data):
         if not gtf_file:
             gtf_file = dd.get_gtf_file(odata)
         out_file = os.path.join(out_dir, dd.get_genome_build(odata) + "-tx2gene.csv")
+        tools_on = dd.get_tools_on(odata)
+        if tools_on and "keep_gene_version" in tools_on:
+            k_version = True
+        else:
+            k_version = False
         if file_exists(out_file):
             tx2gene_files.append(out_file)
         else:
-            out_file = gtf.tx2genefile(gtf_file, out_file, tsv=False)
+            out_file = gtf.tx2genefile(gtf_file, out_file, tsv=False, keep_version = k_version)
             tx2gene_files.append(out_file)
     combined_file = os.path.join(out_dir, "tx2gene.csv")
     if file_exists(combined_file):
@@ -168,11 +173,12 @@ def sailfish_index(gtf_file, ref_file, data, build):
     return out_dir
 
 def _libtype_string(fq1, fq2, strandedness):
-    """
-    supports just the Tophat unstranded/firstrand/secondstrand
-    """
-    libtype = "-l I" if fq2 else "-l "
-    strand = _sailfish_strand_string(strandedness)
+    """supports just the Tophat unstranded/firstrand/secondstrand"""
+    libtype = "-l "
+    strand = "A"
+    if strandedness != "auto":
+        libtype = "-l I" if fq2 else "-l "
+        strand = _sailfish_strand_string(strandedness)
     return libtype + strand
 
 def _sailfish_strand_string(strandedness):

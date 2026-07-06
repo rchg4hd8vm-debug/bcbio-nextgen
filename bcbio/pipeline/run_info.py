@@ -477,6 +477,8 @@ def _check_for_problem_somatic_batches(items, config):
 
     We do not support multiple tumors in a single batch and VarDict(Java) does not
     handle pooled calling, only tumor/normal.
+
+    We allow multiple normals when batch: pon_build is set
     """
     to_check = []
     for data in items:
@@ -490,7 +492,9 @@ def _check_for_problem_somatic_batches(items, config):
             for batch in batches:
                 data_by_batches[batch].append(data)
     for batch, items in data_by_batches.items():
-        if vcfutils.get_paired(items):
+        if batch == "pon_build": 
+            pass
+        elif vcfutils.get_paired(items):
             vcfutils.check_paired_problems(items)
         elif len(items) > 1:
             vcs = vcfutils.get_somatic_variantcallers(items)
@@ -705,7 +709,7 @@ def _check_svcaller(item):
     if len(problem) > 0:
         raise ValueError("Unexpected algorithm 'svcaller' parameters: %s\n"
                          "Supported options: %s\n" % (" ".join(["'%s'" % x for x in problem]),
-                                                      sorted(list(allowed))))
+                                                      list(allowed)))
     if "gatk-cnv" in svs and "cnvkit" in svs:
         raise ValueError("%s uses `gatk-cnv' and 'cnvkit', please use on one of these CNV callers" %
                          dd.get_sample_name(item))
@@ -720,13 +724,17 @@ def _get_as_list(item, k):
 
 def _check_hetcaller(item):
     """Ensure upstream SV callers requires to heterogeneity analysis are available.
+    purecn has its own segmentation - no need in cnvkit or gatk-cnv
     """
-    svs = _get_as_list(item, "svcaller")
     hets = _get_as_list(item, "hetcaller")
-    if hets or any([x in svs for x in ["titancna", "purecn"]]):
-        if not any([x in svs for x in ["cnvkit", "gatk-cnv"]]):
-            raise ValueError("Heterogeneity caller used but need CNV calls. Add `gatk-cnv` "
-                             "or `cnvkit` to `svcaller` in sample: %s" % item["description"])
+    svs = _get_as_list(item, "svcaller")
+    needing_cnv = hets.copy()
+    for s in svs:
+        if s in ["titancna"]:
+            needing_cnv.append(s)
+    if needing_cnv and not any([x in svs for x in ["cnvkit", "gatk-cnv"]]):
+            raise ValueError("Heterogeneity caller(s) %s used but need CNV calls. Add `gatk-cnv` "
+                             "or `cnvkit` to `svcaller` in sample: %s" % (", ".join(needing_cnv), item["description"]))
 
 def _check_jointcaller(data):
     """Ensure specified jointcaller is valid.
@@ -773,9 +781,15 @@ def _check_trim(data):
                              (dd.get_sample_name(data)))
 
 
+def _check_hla_align(data):
+    """ Check for align: bwa if hlacaller: optitype """
+    algorithm = tz.get_in(["algorithm"], data)
+    if algorithm and "aligner" in algorithm and "hlacaller" in algorithm:
+        if algorithm["aligner"] != "bwa" and algorithm["hlacaller"].lower() == "optitype":
+            raise ValueError(f"In sample {dd.get_sample_name(data)}, hlacaller: optitype requires aligner: bwa")
+
 def _check_sample_config(items, in_file, config):
-    """Identify common problems in input sample configuration files.
-    """
+    """Identify common problems in input sample configuration files."""
     logger.info("Checking sample YAML configuration: %s" % in_file)
     _check_quality_format(items)
     _check_for_duplicates(items, "lane")
@@ -799,6 +813,7 @@ def _check_sample_config(items, in_file, config):
     [_check_hlacaller(x) for x in items]
     [_check_realign(x) for x in items]
     [_check_trim(x) for x in items]
+    [_check_hla_align(x) for x in items]
 
 # ## Read bcbio_sample.yaml files
 

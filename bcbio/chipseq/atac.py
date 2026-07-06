@@ -38,13 +38,20 @@ def calculate_complexity_metrics(work_bam, data):
     with file_transaction(metrics_file) as tx_metrics_file:
         with open(tx_metrics_file, "w") as out_handle:
             out_handle.write("mt,m0,m1,m2\n")
-        cmd = (f"{bedtools} bamtobed -bedpe -i {work_bam} | "
-               "awk 'BEGIN{OFS=\"\\t\"}{print $1,$2,$4,$6,$9,$10}' | "
-               "sort | "
-               "uniq -c | "
-               "awk 'BEGIN{mt=0;m0=0;m1=0;m2=0}($1==1){m1=m1+1} "
-               "($1==2){m2=m2+1}{m0=m0+1}{mt=mt+$1}END{printf \"%d,%d,%d,%d\\n\", mt,m0,m1,m2}' >> "
-               f"{tx_metrics_file}")
+        if bam.is_paired(work_bam):
+            cmd = (f"{bedtools} bamtobed -bedpe -i {work_bam} | "
+                "awk 'BEGIN{OFS=\"\\t\"}{print $1,$2,$4,$6,$9,$10}' | "
+                "sort | "
+                "uniq -c | "
+                "awk 'BEGIN{mt=0;m0=0;m1=0;m2=0}($1==1){m1=m1+1} ($1==2){m2=m2+1}{m0=m0+1}{mt=mt+$1} END{printf \"%d,%d,%d,%d\\n\", mt,m0,m1,m2}' >> "
+                f"{tx_metrics_file}")
+        else:
+            cmd = (f"{bedtools} bamtobed -i {work_bam} | "
+                   "awk 'BEGIN{OFS=\"\\t\"}{print $1,$2,$3,$6}' | "
+                   "sort | "
+                   "uniq -c | "
+                   "awk 'BEGIN{mt=0;m0=0;m1=0;m2=0} ($1==1){m1=m1+1} ($1==2){m2=m2+1}{m0=m0+1}{mt=mt+$1} END{printf \"%d,%d,%d,%d\\n\", mt,m0,m1,m2}' >> "
+                   f"{tx_metrics_file}")
         message = f"Calculating ATAC-seq complexity metrics on {work_bam}, saving as {metrics_file}."
         do.run(cmd, message)
     data = tz.assoc_in(data, ['atac', 'complexity_metrics_file'], metrics_file)
@@ -66,11 +73,45 @@ def calculate_encode_complexity_metrics(data):
     else:
         PBC2 = raw_metrics["m1"] / raw_metrics["m2"]
     metrics["PBC2"] = PBC2
-    metrics["bottlenecking"] = get_bottlenecking_flag(metrics["PBC1"], metrics["PBC2"])
-    metrics["complexity"] = get_complexity_flag(metrics["NRF"])
+
+    if dd.get_chip_method(data) == "atac":
+        metrics["bottlenecking"] = get_atac_bottlenecking_flag(metrics["PBC1"], metrics["PBC2"])
+        metrics["complexity"] = get_atac_complexity_flag(metrics["NRF"])
+    else:
+        metrics["bottlenecking"] = get_chip_bottlenecking_flag(metrics["PBC1"], metrics["PBC2"])
+        metrics["complexity"] = get_chip_complexity_flag(metrics["NRF"])
     return(metrics)
 
-def get_bottlenecking_flag(PBC1, PBC2):
+def get_chip_bottlenecking_flag(PBC1, PBC2):
+    """
+    flags from: https://www.encodeproject.org/data-standards/terms/ under Library Complexity
+    """
+    if PBC1 < 0.5 or PBC2 < 1:
+        return "severe"
+    elif PBC1 <= 0.8 or PBC2 <= 3:
+        return "moderate"
+    elif PBC1 <= 0.9 or PBC2 <= 10:
+        return "mild"
+    else:
+        return "none"
+
+def get_chip_complexity_flag(NRF):
+    """
+    flags from: https://www.encodeproject.org/data-standards/terms/ under Library Complexity
+    """
+    if NRF < 0.5:
+        return "concerning"
+    elif NRF < 0.8:
+        return "acceptable"
+    elif NRF < 0.9:
+        return "compliant"
+    else:
+        return "ideal"
+
+def get_atac_bottlenecking_flag(PBC1, PBC2):
+    """
+    flags from: https://www.encodeproject.org/data-standards/terms/ under Library Complexity
+    """
     if PBC1 < 0.7 or PBC2 < 1:
         return "severe"
     elif PBC1 <= 0.9 or PBC2 <= 3:
@@ -78,14 +119,16 @@ def get_bottlenecking_flag(PBC1, PBC2):
     else:
         return "none"
 
-def get_complexity_flag(NRF):
+def get_atac_complexity_flag(NRF):
+    """
+    flags from: https://www.encodeproject.org/data-standards/terms/ under Library Complexity
+    """
     if NRF < 0.7:
         return "concerning"
     elif NRF < 0.9:
         return "acceptable"
     else:
         return "ideal"
-
 
 def split_ATAC(data, bam_file=None):
     """
@@ -99,12 +142,19 @@ def split_ATAC(data, bam_file=None):
     bam_file = bam_file if bam_file else dd.get_work_bam(data)
     out_stem = os.path.splitext(bam_file)[0]
     split_files = {}
+    # we can only split these fractions from paired runs
+    if not bam.is_paired(bam_file):
+        split_files["full"] = bam_file
+        data = tz.assoc_in(data, ['atac', 'align'], split_files)
+        return data
+    # reads on the negative strand have a negative template_length value
     for arange in ATACRanges.values():
         out_file = f"{out_stem}-{arange.label}.bam"
         if not utils.file_exists(out_file):
             with file_transaction(out_file) as tx_out_file:
                 cmd = base_cmd +\
-                    f'-F "template_length > {arange.min} and template_length < {arange.max}" ' +\
+                    f'-F "(template_length > {arange.min} and template_length < {arange.max}) or ' +\
+                    f'(template_length) < {-arange.min} and template_length > {-arange.max})" ' +\
                     f'{bam_file} > {tx_out_file}'
                 message = f'Splitting {arange.label} regions from {bam_file}.'
                 do.run(cmd, message)
@@ -133,8 +183,17 @@ def run_ataqv(data):
         return out_file
     tss_bed_file = os.path.join(out_dir, "TSS.bed")
     tss_bed_file = gtf.get_tss_bed(dd.get_gtf_file(data), tss_bed_file, data, padding=0)
-    autosomal_reference = os.path.join(out_dir, "autosomal.txt")
-    autosomal_reference = _make_autosomal_reference_file(autosomal_reference, data)
+    if chromhacks.is_human(data):
+        organism = "human"
+        autosomal_reference_flag = ""
+    elif chromhacks.is_mouse(data):
+        organism = "mouse"
+        autosomal_reference_flag = ""
+    else:
+        autosomal_reference = os.path.join(out_dir, "autosomal.txt")
+        autosomal_reference = _make_autosomal_reference_file(autosomal_reference, data)
+        organism = "None"
+        autosomal_reference_flag = f"--autosomal-reference-file {autosomal_reference} "
     ataqv = config_utils.get_program("ataqv", data)
     mitoname = chromhacks.get_mitochondrial_chroms(data)[0]
     if not ataqv:
@@ -142,10 +201,10 @@ def run_ataqv(data):
         return None
     with file_transaction(out_file) as tx_out_file:
         cmd = (f"{ataqv} --peak-file {peak_file} --name {sample_name} --metrics-file {tx_out_file} "
-               f"--tss-file {tss_bed_file} --autosomal-reference-file {autosomal_reference} "
+               f"--tss-file {tss_bed_file} {autosomal_reference_flag} "
                f"--ignore-read-groups --mitochondrial-reference-name {mitoname} "
                f"--tss-extension 1000 "
-               f"None {bam_file}")
+               f"{organism} {bam_file}")
         message = f"Running ataqv on {sample_name}."
         do.run(cmd, message)
     return out_file
@@ -195,3 +254,48 @@ def get_full_peaks(data):
         if f.endswith("narrowPeak") or f.endswith("broadPeak"):
             return f
     return None
+
+def create_ataqv_report(samples):
+    """
+    make the ataqv report from a set of ATAC-seq samples
+    """
+    data = samples[0][0]
+    new_samples = []
+    reportdir = os.path.join(dd.get_work_dir(data), "qc", "ataqv")
+    sentinel = os.path.join(reportdir, "index.html")
+    if utils.file_exists(sentinel):
+        ataqv_output = {"base": sentinel, "secondary": get_ataqv_report_files(reportdir)}
+        new_data = []
+        for data in dd.sample_data_iterator(samples):
+            data = tz.assoc_in(data, ["ataqv_report"], ataqv_output)
+            new_data.append(data)
+        return dd.get_samples_from_datalist(new_data)
+    mkarv = config_utils.get_program("mkarv", dd.get_config(data))
+    ataqv_files = []
+    for data in dd.sample_data_iterator(samples):
+        qc = dd.get_summary_qc(data)
+        ataqv_file = tz.get_in(("ataqv", "base"), qc, None)
+        if ataqv_file and utils.file_exists(ataqv_file):
+            ataqv_files.append(ataqv_file)
+    if not ataqv_files:
+        return samples
+    ataqv_json_file_string = " ".join(ataqv_files)
+    with file_transaction(reportdir) as txreportdir:
+        cmd = f"{mkarv} {txreportdir} {ataqv_json_file_string}"
+        message = f"Creating ataqv report from {ataqv_json_file_string}."
+        do.run(cmd, message)
+    new_data = []
+    ataqv_output = {"base": sentinel, "secondary": get_ataqv_report_files(reportdir)}
+    for data in dd.sample_data_iterator(samples):
+        data = tz.assoc_in(data, ["ataqv_report"], ataqv_output)
+        new_data.append(data)
+    return dd.get_samples_from_datalist(new_data)
+
+def get_ataqv_report_files(reportdir):
+    files = []
+    for r, d, f in os.walk(reportdir):
+        for file in f:
+            f = os.path.join(r, file)
+            if utils.file_exists(f):
+                files.append(f)
+    return files

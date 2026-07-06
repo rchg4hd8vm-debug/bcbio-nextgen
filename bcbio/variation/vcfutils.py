@@ -22,6 +22,8 @@ from bcbio.pipeline import config_utils, tools
 from bcbio.pipeline import datadict as dd
 from bcbio.provenance import do
 
+from bcbio.log import logger
+
 # ## Tumor/normal paired cancer analyses
 
 PairedData = namedtuple("PairedData", ["tumor_bam", "tumor_name",
@@ -62,7 +64,7 @@ def get_paired_bams(align_bams, items):
     Allows cases with only tumor BAMs to handle callers that can work without
     normal BAMs or with normal VCF panels.
     """
-    tumor_bam, tumor_name, normal_bam, normal_name, normal_panel, tumor_config, normal_data = (None,) * 7
+    tumor_bam, tumor_name, tumor_data, normal_bam, normal_name, normal_panel, tumor_config, normal_data = (None,) * 8
     for bamfile, item in zip(align_bams, items):
         phenotype = get_paired_phenotype(item)
         if phenotype == "normal":
@@ -94,8 +96,7 @@ def get_somatic_variantcallers(items):
     return set(vcs)
 
 def check_paired_problems(items):
-    """Check for incorrectly paired tumor/normal samples in a batch.
-    """
+    """Check for incorrectly paired tumor/normal samples in a batch."""
     # ensure we're in a paired batch
     if not get_paired(items):
         return
@@ -113,7 +114,11 @@ def check_paired_problems(items):
         if "mutect" in vcs or "mutect2" in vcs or "strelka2" in vcs:
             paired = get_paired(items)
             if not (paired.normal_data or paired.normal_panel):
-                raise ValueError("MuTect, MuTect2 and Strelka2 somatic calling requires normal sample or panel: %s" %
+                # give a warning for mutect2, error out for mutect and strelka
+                if "mutect2" in vcs:
+                    logger.info("Using a PON or a normal sample is recommended!")
+                else:
+                    raise ValueError("MuTect and Strelka2 somatic calling requires normal sample or panel: %s" %
                                  [dd.get_sample_name(data) for data in items])
 
 def get_paired_phenotype(data):
@@ -200,7 +205,7 @@ def split_snps_indels(orig_file, ref_file, config):
     return snp_file, indel_file
 
 def get_normal_sample(in_file):
-    """Retrieve normal sample if normal/turmor
+    """Retrieve normal sample if normal/tumor
     """
     with utils.open_gzipsafe(in_file) as in_handle:
         for line in in_handle:
@@ -298,7 +303,11 @@ def merge_variant_files(orig_files, out_file, ref_file, config, region=None):
         file_key = config["file_key"]
         in_pipeline = True
         orig_files = orig_files[file_key]
-    out_file = _do_merge(orig_files, out_file, config, region)
+    if tz.get_in(["algorithm", "purecn_pon_build"], config):
+        out_vcf, ext = os.path.splitext(out_file)
+        out_file = _do_combine_variants(orig_files, out_vcf, ref_file, config, region)
+    else:
+        out_file = _do_merge(orig_files, out_file, config, region)
     if in_pipeline:
         return [{file_key: out_file, "region": region, "sam_ref": ref_file, "config": config}]
     else:
@@ -323,6 +332,25 @@ def _do_merge(orig_files, out_file, config, region):
     if out_file.endswith(".gz"):
         bgzip_and_index(out_file, config)
     return out_file
+
+def _do_combine_variants(orig_files, out_vcf, ref_file, config, region, minimumN = 3):
+    """combine variants with gatk3 using minimum N threshold for PureCN PON"""
+    gatk3 = config_utils.get_program("gatk3", config)
+    cmd = [gatk3, "-Xmx12g",
+           "-T", "CombineVariants",
+           "-R", ref_file,
+           "-o", out_vcf,
+           "--minimumN", minimumN]
+    out_gz = out_vcf + ".gz"
+    if not os.path.exists(out_gz):
+        try:
+            cmd_line = " ".join([str(x) for x in cmd]) + " -V " + " -V ".join(orig_files)
+            do.run(cmd_line, "combine variants")
+        except subprocess.CalledProcessError as msg:
+              logger.info("PON merge failed")
+        bgzip_and_index(out_vcf, config)
+        logger.debug("Saved SNV PON to " + out_gz)
+    return out_gz
 
 def _check_samples_nodups(fnames):
     """Ensure a set of input VCFs do not have duplicate samples.
@@ -450,9 +478,10 @@ def _fix_gatk_header(exist_files, out_file, config):
         ropts = []
         if "options" in resources:
             ropts += [str(x) for x in resources.get("options", [])]
-        do.run("%s && picard FixVcfHeader HEADER=%s INPUT=%s OUTPUT=%s %s" %
-               (utils.get_java_clprep(), header_file, base_file, base_fix_file, " ".join(ropts)),
-               "Reheader initial VCF file in merge")
+        bcftools = config_utils.get_program("bcftools", config)
+        cmd = f"{bcftools} reheader --header {header_file} --output {tx_out_file} {base_file}"
+        message = f"Reheader {base_file} with header from {replace_file}."
+        do.run(cmd, message)
     bgzip_and_index(base_fix_file, config)
     return [base_fix_file] + [x for (c, x) in exist_files[1:]]
 
@@ -507,7 +536,7 @@ def combine_variant_files(orig_files, out_file, ref_file, config,
             cmd = ["picard"] + broad.get_picard_opts(config, memscale) + \
                   ["MergeVcfs", "D=%s" % dict_file, "O=%s" % tx_out_file] + \
                   ["I=%s" % f for f in ready_files]
-            cmd = "%s && %s" % (utils.get_java_clprep(), " ".join(cmd))
+            cmd = "%s && %s" % (utils.get_java_clprep(os.path.realpath(utils.which("picard"))), " ".join(cmd))
             do.run(cmd, "Combine variant files")
     if out_file.endswith(".gz"):
         bgzip_and_index(out_file, config)

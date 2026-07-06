@@ -175,8 +175,7 @@ def get_aligned_reads(in_bam, data):
     return 1.0 * align / total
 
 def downsample(in_bam, data, target_counts, work_dir=None):
-    """Downsample a BAM file to the specified number of target counts.
-    """
+    """Downsample a BAM file to the specified number of target counts."""
     index(in_bam, data["config"], check_timestamp=False)
     ds_pct = get_downsample_pct(in_bam, target_counts, data)
     if ds_pct:
@@ -254,6 +253,28 @@ def check_header(in_bam, rgnames, ref_file, config):
     """
     _check_bam_contigs(in_bam, ref_file, config)
     _check_sample(in_bam, rgnames)
+
+def has_tags(in_bam, tags):
+    """
+    Checks the first 10,000 records in a BAM file for a set of tags.
+    Returns True if all the tags are seen at least once and False otherwise.
+    """
+    assert isinstance(tags, set), f"{tags} is not a set."
+    assert is_bam(in_bam), f"{in_bam} is not a BAM file."
+    MAX_ALIGNMENTS = 10000
+    with pysam.Samfile(in_bam, "rb") as bamfile:
+        alignments = 0
+        for read in bamfile.fetch(until_eof=True):
+            alignments += 1
+            if alignments > MAX_ALIGNMENTS:
+                return False
+            if not tags:
+                return True
+            tags_left = tags.copy()
+            for tag in tags_left:
+                if read.has_tag(tag):
+                    tags.remove(tag)
+    return False
 
 def _check_sample(in_bam, rgnames):
     """Ensure input sample name matches expected run group names.
@@ -593,3 +614,22 @@ def count_alignments(in_bam, data, filter=None):
     result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
     return int(result.stdout.decode().strip())
+
+def has_nalignments(in_bam, n, data, filter=None):
+    """
+    does a BAM file has at least n alignments?
+    """
+    sambamba = config_utils.get_program("sambamba", dd.get_config(data))
+    num_cores = dd.get_num_cores(data)
+    if not filter:
+        filter_string = ""
+        message = f"Counting alignments in {in_bam}."
+    else:
+        filter_string = "--filter {filter}"
+        message = f"Counting alignments in {in_bam} matching {filter}."
+    cmd = f"{sambamba} view -f sam {filter_string} {in_bam} | head -{n} | wc -l"
+    logger.info(message)
+    result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    return int(result.stdout.decode().strip()) >= n
+

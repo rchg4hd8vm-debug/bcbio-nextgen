@@ -19,8 +19,12 @@ import six
 import toolz as tz
 import yaml
 
-from collections import Mapping, OrderedDict
+try:
+   from collections.abc import Mapping
+except ImportError:
+   from collections import Mapping
 
+from collections import OrderedDict
 
 try:
     from concurrent import futures
@@ -335,14 +339,14 @@ def file_plus_index(fname):
         return [fname]
 
 def remove_plus(orig):
-    """Remove a fils, including biological index files.
+    """Remove a file, including biological index files.
     """
     for ext in ["", ".idx", ".gbi", ".tbi", ".bai"]:
         if os.path.exists(orig + ext):
             remove_safe(orig + ext)
 
 def copy_plus(orig, new):
-    """Copy a fils, including biological index files.
+    """Copy a file, including biological index files.
     """
     for ext in ["", ".idx", ".gbi", ".tbi", ".bai"]:
         if os.path.exists(orig + ext) and (not os.path.lexists(new + ext) or not os.path.exists(new + ext)):
@@ -689,12 +693,15 @@ def dictapply(d, fn):
             d[k] = fn(v)
     return d
 
-def Rscript_cmd():
-    """Retrieve path to locally installed Rscript or first in PATH.
-
+def Rscript_cmd(env="base"):
+    """Retrieve path to locally installed Rscript in the given env.
     Prefers Rscript version installed via conda to a system version.
     """
-    rscript = which(os.path.join(get_bcbio_bin(), "Rscript"))
+    if env == "base":
+        rscript = which(os.path.join(get_bcbio_bin(), "Rscript"))
+    else:
+        conda_dir = get_conda_dir()
+        rscript = os.path.join(conda_dir, "envs", env, "bin", "Rscript")
     if rscript:
         return rscript
     else:
@@ -713,10 +720,21 @@ def R_sitelib(env="base"):
             raise OSError("The {env} environment does not have R installed.")
         return sitelib
 
+def R_package_script(package, script, env="base"):
+    """Return path to a script in an R package within env (PureCN)"""
+    conda_dir = get_conda_dir()
+    if env == "base":
+        env_dir = conda_dir
+    else:
+        env_dir = os.path.join(conda_dir, "envs", env)
+    script_path = os.path.join(env_dir, "lib", "R", "library", package, script)
+    if not file_exists(script_path):
+        return None
+    else:
+        return script_path
+
 def R_package_path(package):
-    """
-    return the path to an installed R package
-    """
+    """ return the path to an installed R package """
     local_sitelib = R_sitelib()
     rscript = Rscript_cmd()
     cmd = """{rscript} --vanilla -e '.libPaths(c("{local_sitelib}")); find.package("{package}")'"""
@@ -826,6 +844,7 @@ def get_conda_dir():
 def get_all_conda_bins():
     """Retrieve all possible conda bin directories, including environments.
     """
+    bcbio_bin = get_bcbio_bin()
     conda_dir = get_conda_dir()
     if os.path.join("anaconda", "envs") in conda_dir:
         conda_dir = os.path.join(conda_dir[:conda_dir.rfind(os.path.join("anaconda", "envs"))], "anaconda")

@@ -1,6 +1,7 @@
 import os
-import subprocess
 import glob
+import subprocess
+import sys
 
 from bcbio import utils
 from bcbio.provenance import do
@@ -24,8 +25,15 @@ def run(name, chip_bam, input_bam, genome_build, out_dir, method, resources, dat
         _compress_and_sort_bdg_files(out_dir, data)
         return _get_output_files(out_dir)
     macs2 = config_utils.get_program("macs2", config)
-    antibody = antibodies.ANTIBODIES.get(dd.get_antibody(data).lower(), None)
+    antibody = dd.get_antibody(data)
     if antibody:
+        antibody = antibody.lower()
+        if antibody not in antibodies.SUPPORTED_ANTIBODIES:
+            logger.error(f"{antibody} specified, but not listed as a supported antibody. Valid antibodies are {antibodies.SUPPORTED_ANTIBODIES}. If you know your antibody "
+                        f"should be called with narrow or broad peaks, supply 'narrow' or 'broad' as the antibody."
+                        f"It will run 'narrow' if the antibody is not supported.")
+            antibody = 'narrow'
+        antibody = antibodies.ANTIBODIES[antibody]
         logger.info(f"{antibody.name} specified, using {antibody.peaktype} peak settings.")
         peaksettings = select_peak_parameters(antibody)
     elif method == "atac":
@@ -37,6 +45,10 @@ def run(name, chip_bam, input_bam, genome_build, out_dir, method, resources, dat
     genome_size = bam.fasta.total_sequence_length(dd.get_ref_file(data))
     genome_size = "" if options.find("-g") > -1 else "-g %s" % genome_size
     paired = "-f BAMPE" if bam.is_paired(chip_bam) else ""
+    chip_reads = sum([x.aligned for x in bam.idxstats(chip_bam, data)])
+    if chip_reads == 0:
+        logger.error(f"{chip_bam} has 0 reads. Please remove the sample and re-run")
+        raise RuntimeWarning(f"macs2 terminated - no reads in {chip_bam}. Please remove the sample and re-run")
     with utils.chdir(out_dir):
         cmd = _macs2_cmd(data)
         cmd += peaksettings

@@ -8,21 +8,19 @@ assignees: ''
 ---
 
 **Version info**
- - bcbio version (bcbio_nextgen.py --version):
- - OS name and version:
+- bcbio version (`bcbio_nextgen.py --version`):
+- OS name and version (`lsb_release -ds`):
 
 **To Reproduce**
- - Exact bcbio command you have used
- - Your sample configuration file
+Exact bcbio command you have used:
+```
 
-**Observed behavior**
-Error message or bcbio output.
+```
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+Your yaml configuration file:
+```
 
-**Log files**
-Please attach (10MB max): `bcbio-nextgen.log`, `bcbio-nextgen-commands.log`, and `bcbio-nextgen-debug.log`.
+```
 
-**Additional context**
-Add any other context about the problem here.
+**Log files (could be found in work/log)**
+Please attach (10MB max):  `bcbio-nextgen-commands.log`, and `bcbio-nextgen-debug.log`.

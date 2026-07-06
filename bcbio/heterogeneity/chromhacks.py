@@ -27,7 +27,7 @@ def is_sex(chrom):
     return chrom in ["X", "chrX", "Y", "chrY"]
 
 def is_mitochondrial(chrom):
-    return chrom in ["MT", "chrM", "chrMT"]
+    return chrom in ["MT", "chrM", "chrMT", "mitochondrion_genome"]
 
 def is_autosomal_or_x(chrom):
     return is_autosomal(chrom) or chrom in ["X", "chrX"]
@@ -77,3 +77,19 @@ def is_alt(chrom):
     check if chromosome is an ALT
     """
     return chrom.endswith("_alt")
+
+def is_hla(chrom):
+    """
+    check if a chromosome is an HLA
+    """
+    return chrom.startswith("HLA")
+
+def is_human(data):
+    return dd.get_genome_build(data) in ["hg38", "GRCh37", "GRCh38", "hg19"]
+
+def is_mouse(data):
+    return dd.get_genome_build(data) in ["mm10"]
+
+def get_hla_chroms(ref_file):
+    hla = [c.name for c in ref.file_contigs(ref_file) if is_hla(c.name)]
+    return hla

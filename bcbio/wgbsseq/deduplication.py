@@ -5,14 +5,15 @@ from bcbio.distributed import transaction
 from bcbio.pipeline import datadict, config_utils
 from bcbio.provenance import do
 from bcbio import bam
-
+from bcbio.pipeline import datadict as dd
 
 def dedup_bismark(data):
-    """Remove alignments to the same position in the genome from the Bismark
-    mapping output using deduplicate_bismark
-    """
+    """ Remove alignments to the same position in the genome from the Bismark
+    mapping output using deduplicate_bismark """
+    config = data["config"]
     input_file = datadict.get_work_bam(data)
-    input_file = bam.sort(input_file, datadict.get_config(data), order="queryname")
+    # don't sort even by read names
+    # input_file = bam.sort(input_file, config, order="queryname")
     sample_name = datadict.get_sample_name(data)
     output_dir = os.path.join(datadict.get_work_dir(data), 'dedup',
                               sample_name)
@@ -27,13 +28,21 @@ def dedup_bismark(data):
 
     if utils.file_exists(output_file):
         data = datadict.set_work_bam(data, output_file)
+        data["deduplication_report"] = output_file.replace("deduplicated.bam", "deduplication_report.txt")
+        data = dd.update_summary_qc(data, "bismark", base=data["deduplication_report"])
         return [[data]]
 
-    deduplicate_bismark = config_utils.get_program('deduplicate_bismark',
-                                                   data['config'])
-    command = f'{deduplicate_bismark} --output_dir {output_dir} {input_file}'
+    deduplicate_bismark = config_utils.get_program('deduplicate_bismark', config)
+    resources = config_utils.get_resources("deduplicate_bismark", data)
+    opt = ""
+    if "options" in resources:
+        opt_list = [str(x) for x in resources.get("options", [])]
+        opt = ' '.join(opt_list)
+    command = f'{deduplicate_bismark} {opt} --output_dir {output_dir} {input_file}'
     with transaction.file_transaction(output_dir):
         do.run(command, 'remove deduplicate alignments')
 
     data = datadict.set_work_bam(data, output_file)
+    data["deduplication_report"] = output_file.replace("deduplicated.bam", "deduplication_report.txt")
+    data = dd.update_summary_qc(data, "bismark", base=data["deduplication_report"])
     return [[data]]

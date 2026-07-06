@@ -14,22 +14,30 @@ from bcbio import utils
 from bcbio.heterogeneity import chromhacks
 from bcbio.log import logger
 from bcbio.pipeline import datadict as dd
+from bcbio.pipeline import config_utils
 from bcbio.distributed.transaction import file_transaction
 from bcbio.heterogeneity import loh
 from bcbio.provenance import do
 from bcbio.variation import germline, vcfutils
-from bcbio.structural import cnvkit, gatkcnv
+from bcbio.structural import cnvkit, gatkcnv, regions
 
 def run(items):
     paired = vcfutils.get_paired(items)
+    # paired is PairedInfo of one T/N pair (or just T) - named tuple, paired.tumor_config
     if not paired:
         logger.info("Skipping PureCN; no somatic tumor calls in batch: %s" %
                     " ".join([dd.get_sample_name(d) for d in items]))
         return items
     work_dir = _sv_workdir(paired.tumor_data)
-    purecn_out = _run_purecn(paired, work_dir)
-    # XXX Currently finding edge case failures with Dx calling, needs additional testing
-    # purecn_out = _run_purecn_dx(purecn_out, paired)
+    normaldb = tz.get_in(["algorithm", "background", "cnv_reference", "purecn_normaldb"], paired.tumor_config)
+    # the right way of running purecn is with normaldb
+    if normaldb:
+        purecn_out = _run_purecn_normaldb(paired, work_dir)
+        # don't run signature analysis if there is no purecn solution
+        if "rds" in purecn_out:
+            purecn_out = _run_purecn_dx(purecn_out, paired)
+    else:
+        purecn_out = _run_purecn(paired, work_dir)
     out = []
     if paired.normal_data:
         out.append(paired.normal_data)
@@ -46,32 +54,107 @@ def run(items):
     out.append(paired.tumor_data)
     return out
 
+def _run_purecn_normaldb(paired, out):
+    """Run PureCN with normaldb and native segmentation
+       paired is one t/n pair or only """
+    sample = utils.to_single_data(paired.tumor_data)
+    bed_file = tz.get_in(["config", "algorithm", "purecn_bed_ready"], sample)
+    sample_name = dd.get_sample_name(sample)
+    work_dir = _sv_workdir(sample)
+    rscript = utils.Rscript_cmd()
+    purecn_r = utils.R_package_script("PureCN", "extdata/PureCN.R", env="base")
+    intervals = tz.get_in(["config", "algorithm", "purecn_bed_ready"], sample)
+    bam_file = dd.get_align_bam(sample)
+    # termline and somatic - just annotated and filters assigned
+    variants_vcf =  tz.get_in(["variants"], sample)[0].get("germline")
+    # in a T/N case, there is no germline file - vrn file with all variants
+    if not variants_vcf:
+        variants_vcf = tz.get_in(["variants"], sample)[0].get("vrn_file")
+    normaldb = tz.get_in(["config", "algorithm", "background", "cnv_reference", "purecn_normaldb"], sample)
+    mappingbiasfile = tz.get_in(["config", "algorithm", "background", "cnv_reference", "purecn_mapping_bias"], sample)
+    sample_coverage = tz.get_in(["depth", "bins", "purecn"], sample)
+    simple_repeat_bed = dd.get_variation_resources(sample)["simple_repeat"]
+    result_file = os.path.join(work_dir, sample_name + ".rds")
+    genome = dd.get_genome_build(sample)
+    cmd = [ rscript, purecn_r,
+            "--out", work_dir,
+            "--tumor", sample_coverage,
+            "--sampleid", sample_name,
+            "--vcf", variants_vcf,
+            "--normaldb", normaldb,
+            "--mapping-bias-file", mappingbiasfile,
+            "--intervals", intervals,
+            "--snp-blacklist", simple_repeat_bed,
+            "--genome", genome,
+            "--force",
+            "--post-optimize",
+            "--seed", "123",
+            "--bootstrapn", "500",
+            "--cores", dd.get_num_cores(sample)]
+    resources = config_utils.get_resources("purecn", sample)
+    if "options" in resources:
+        cmd += [str(x) for x in resources.get("options", [])]
+    # it is not recommended to use matched normal sample in PureCN analysis,
+    # because then it skips PON coverage normalization and denoising steps!
+    # but still, if it is supplied, we useit
+    if paired.normal_data:
+        normal_sample = utils.to_single_data(paired.normal_data)
+        if normal_sample:
+            normal_coverage = tz.get_in(["depth", "bins", "purecn"], normal_sample)
+            cmd.extend(["--normal", normal_coverage])
+    if not os.path.exists(result_file):
+        try:
+            cmd_line = "export R_LIBS_USER=%s && %s && %s" % (utils.R_sitelib(env = "base"),
+                                                              utils.get_R_exports(env = "base"),
+                                                              " ".join([str(x) for x in cmd]))
+            do.run(cmd_line, "PureCN copy number calling")
+            logger.debug("Saved PureCN output to " + work_dir)
+        except subprocess.CalledProcessError as msg:
+            logger.info("PureCN failed")
+    out_base, out, all_files  = _get_purecn_files(paired, work_dir, require_exist = True)
+    return out
+
 def _run_purecn_dx(out, paired):
-    """Extract signatures and mutational burdens from PureCN rds file.
-    """
-    out_base, out, all_files = _get_purecn_dx_files(paired, out)
-    if not utils.file_uptodate(out["mutation_burden"], out["rds"]):
+    """Extract signatures and mutational burdens from PureCN rds file."""
+    # no solution - no signatures
+    if not "rds" in out:
+        return out
+    rscript = utils.Rscript_cmd()
+    purecndx_r = utils.R_package_script("PureCN", "extdata/Dx.R", env="base")
+    simple_repeat_bed = dd.get_variation_resources(paired.tumor_data)["simple_repeat"]
+    callable_bed = dd.get_sample_callable(paired.tumor_data)
+    out_base = utils.splitext_plus(out["rds"])[0]
+    mutation_burden_csv = out_base + "_mutation_burden.csv"
+    if not utils.file_uptodate(mutation_burden_csv, out["rds"]):
+        # no signatures - so we generate them
         with file_transaction(paired.tumor_data, out_base) as tx_out_base:
-            cmd = ["PureCN_Dx.R", "--rds", out["rds"], "--callable", dd.get_sample_callable(paired.tumor_data),
-                   "--signatures", "--out", tx_out_base]
+            cmd = [rscript, purecndx_r, 
+                   "--rds", out["rds"], 
+                   "--callable", callable_bed,
+                   "--signatures",
+                   "--exclude", simple_repeat_bed,
+                   "--out", tx_out_base]
             do.run(cmd, "PureCN Dx mutational burden and signatures")
+            out_base, out, all_files = _get_purecn_dx_files(paired, out, require_exist = True)
+            # if a file was not generated it would not go to the upload
             for f in all_files:
                 if os.path.exists(os.path.join(os.path.dirname(tx_out_base), f)):
                     shutil.move(os.path.join(os.path.dirname(tx_out_base), f),
                                 os.path.join(os.path.dirname(out_base), f))
     return out
 
-def _get_purecn_dx_files(paired, out):
-    """Retrieve files generated by PureCN_Dx
-    """
-    out_base = "%s-dx" % utils.splitext_plus(out["rds"])[0]
+def _get_purecn_dx_files(paired, out, require_exist = False):
+    """Retrieve files generated by PureCN_Dx"""
+    out_base = utils.splitext_plus(out["rds"])[0]
     all_files = []
     for key, ext in [[("mutation_burden",), "_mutation_burden.csv"],
                      [("plot", "signatures"), "_signatures.pdf"],
-                     [("signatures",), "_signatures.csv"]]:
-        cur_file = "%s%s" % (out_base, ext)
-        out = tz.update_in(out, key, lambda x: cur_file)
-        all_files.append(os.path.basename(cur_file))
+                     [("signatures",), "_signatures.csv"],
+                     [("chrom_instability",), "_cin.csv"]]:
+        cur_file = f"{out_base}{ext}"
+        if not require_exist or os.path.exists(cur_file):
+            out = tz.update_in(out, key, lambda x: cur_file)
+            all_files.append(os.path.basename(cur_file))
     return out_base, out, all_files
 
 def _run_purecn(paired, work_dir):
@@ -90,7 +173,10 @@ def _run_purecn(paired, work_dir):
             # Use UCSC style naming for human builds to support BSgenome
             genome = ("hg19" if dd.get_genome_build(paired.tumor_data) in ["GRCh37", "hg19"]
                       else dd.get_genome_build(paired.tumor_data))
-            cmd = ["PureCN.R", "--seed", "42", "--out", tx_out_base, "--rds", "%s.rds" % tx_out_base,
+            rscript = utils.Rscript_cmd()
+            purecn_r = utils.R_package_script("PureCN", "extdata/PureCN.R", env="base")
+            cmd = [rscript, purecn_r, "--seed", "42", "--out", tx_out_base, 
+                   "--rds", "%s.rds" % tx_out_base,
                    "--sampleid", dd.get_sample_name(paired.tumor_data),
                    "--genome", genome,
                    "--vcf", vcf_file, "--tumor", cnr_file,
@@ -98,8 +184,8 @@ def _run_purecn(paired, work_dir):
             if dd.get_num_cores(paired.tumor_data) > 1:
                 cmd += ["--cores", str(dd.get_num_cores(paired.tumor_data))]
             try:
-                cmd = "export R_LIBS_USER=%s && %s && %s" % (utils.R_sitelib(env="r36"),
-                                                             utils.get_R_exports(env="r36"),
+                cmd = "export R_LIBS_USER=%s && %s && %s" % (utils.R_sitelib(env="base"),
+                                                             utils.get_R_exports(env="base"),
                                                              " ".join([str(x) for x in cmd]))
                 do.run(cmd, "PureCN copy number calling")
             except subprocess.CalledProcessError as msg:
@@ -186,26 +272,40 @@ def _remove_overlaps(in_file, out_dir, data):
     return out_file
 
 def _get_purecn_files(paired, work_dir, require_exist=False):
-    """Retrieve organized structure of PureCN output files.
-    """
-    out_base = os.path.join(work_dir, "%s-purecn" % (dd.get_sample_name(paired.tumor_data)))
+    """Retrieve organized structure of PureCN output files."""
+    sample_name = dd.get_sample_name(paired.tumor_data)
+    out_base = os.path.join(work_dir, sample_name)
     out = {"plot": {}}
     all_files = []
     for plot in ["chromosomes", "local_optima", "segmentation", "summary"]:
         if plot == "summary":
-            cur_file = "%s.pdf" % out_base
+            cur_file = f"{out_base}.pdf"
         else:
-            cur_file = "%s_%s.pdf" % (out_base, plot)
+            cur_file = f"{out_base}_{plot}.pdf"
         if not require_exist or os.path.exists(cur_file):
             out["plot"][plot] = cur_file
             all_files.append(os.path.basename(cur_file))
-    for key, ext in [["hetsummary", ".csv"], ["dnacopy", "_dnacopy.seg"], ["genes", "_genes.csv"],
-                     ["log", ".log"], ["loh", "_loh.csv"], ["rds", ".rds"],
+    for key, ext in [["hetsummary", ".csv"],
+                     ["dnacopy", "_dnacopy.seg"], 
+                     ["genes", "_genes.csv"],
+                     ["log", ".log"], 
+                     ["loh", "_loh.csv"], 
+                     ["rds", ".rds"],
                      ["variants", "_variants.csv"]]:
-        cur_file = "%s%s" % (out_base, ext)
+        cur_file = f"{out_base}{ext}"
         if not require_exist or os.path.exists(cur_file):
             out[key] = cur_file
             all_files.append(os.path.basename(cur_file))
+    sample_name = dd.get_sample_name(paired.tumor_data)
+    more_files = [sample_name + item for item in ["_amplification_pvalues.csv", "_chromosomes.pdf",
+                                   ".csv", "_dnacopy.seg", "_genes.csv", "_local_optima.pdf",
+                                   ".log", "_loh.csv", ".pdf", ".rds", "_segmentation.pdf",
+                                   "_variants.csv"]]
+    for purecn_file in more_files:
+        purecn_file_path = os.path.join(work_dir, purecn_file)
+        if not require_exist or os.path.exists(purecn_file_path):
+            out[purecn_file] = purecn_file_path
+            all_files.append(purecn_file_path)
     return out_base, out, all_files
 
 def _sv_workdir(data):
@@ -218,15 +318,14 @@ def _get_header(in_handle):
     return in_handle.readline().strip().split(","), in_handle
 
 def _loh_to_vcf(cur):
-    """Convert LOH output into standardized VCF.
-    """
+    """Convert LOH output into standardized VCF."""
     # PureCN 1.14 outputs segments without informative SNPs, skip those
     # see https://github.com/lima1/PureCN/blob/ed7d10c7ca578bc7d1aabef86893c23ddddf79dc/NEWS#L92-L94
     if cur["C"] == "NA" or cur["M"] == "NA":
         return None
     cn = int(float(cur["C"]))
     minor_cn = int(float(cur["M"]))
-    if cur["type"].find("LOH"):
+    if cur["type"].find("LOH") > -1:
         svtype = "LOH"
     elif cn > 2:
         svtype = "DUP"
@@ -235,8 +334,113 @@ def _loh_to_vcf(cur):
     else:
         svtype = None
     if svtype:
-        info = ["SVTYPE=%s" % svtype, "END=%s" % cur["end"],
-                "SVLEN=%s" % (int(cur["end"]) - int(cur["start"])),
-                "CN=%s" % cn, "MajorCN=%s" % (cn - minor_cn), "MinorCN=%s" % minor_cn]
+        # end could be 100.5
+        start = int(float(cur["start"]))
+        end = int(float(cur["end"]))
+        info = [f"SVTYPE={svtype}", 
+                f"END={end}",
+                f"SVLEN={end-start+1}",
+                f"CN={cn}",
+                f"MajorCN={cn - minor_cn}",
+                f"MinorCN={minor_cn}"]
         return [cur["chr"], cur["start"], ".", "N", "<%s>" % svtype, ".", ".",
                 ";".join(info), "GT", "0/1"]
+
+def process_intervals(data):
+    """Prepare intervals file"""
+    bed_file = regions.get_sv_bed(data)
+    if not bed_file:
+         bed_file = bedutils.clean_file(dd.get_variant_regions(data), data)
+    if not bed_file:
+        return None
+
+    basename = os.path.splitext(bed_file)[0]
+    ready_file = basename + ".txt"
+    if os.path.exists(ready_file):
+        return ready_file
+    optimized_bed = basename + ".optimized.bed"
+    rscript = utils.Rscript_cmd("base")
+    interval_file_r = utils.R_package_script("PureCN", "extdata/IntervalFile.R", env="base")
+    ref_file = dd.get_ref_file(data)
+    mappability_resource = dd.get_variation_resources(data)["purecn_mappability"]
+    genome = dd.get_genome_build(data)
+    tools_off = dd.get_tools_off(data)
+    if tools_off and "purecn_offtarget" in tools_off:
+        offtarget_flag = ""
+    else:
+        offtarget_flag = "--off-target"
+    cmd = [rscript, interval_file_r, 
+          "--in-file", bed_file,
+          "--fasta", ref_file,
+          "--out-file", ready_file,
+          offtarget_flag,
+          "--genome", genome,
+          "--export", optimized_bed,
+          "--mappability", mappability_resource]
+    try:
+        cmd_line = "export R_LIBS_USER=%s && %s && %s" % (utils.R_sitelib(env = "base"),
+                                                     utils.get_R_exports(env = "base"),
+                                                     " ".join([str(x) for x in cmd]))
+        do.run(cmd_line, "PureCN intervals")
+    except subprocess.CalledProcessError as msg:
+        logger.info("PureCN failed to prepare intervals")
+    logger.debug("Saved PureCN interval file into " + ready_file)
+    return ready_file
+
+def get_coverage(data):
+    """Calculate coverage for a sample.bam, account for GC content
+       data is single sample
+    """
+    data = utils.to_single_data(data)
+    bed_file = tz.get_in(["config", "algorithm", "purecn_bed_ready"], data)
+    sample_name = dd.get_sample_name(data)
+    work_dir = _sv_workdir(data)
+    rscript = utils.Rscript_cmd("base")
+    coverage_r = utils.R_package_script("PureCN", "extdata/Coverage.R", env="base")
+    intervals = tz.get_in(["config", "algorithm", "purecn_bed_ready"], data)
+    # PureCN resolves symlinks and the actual output PureCN coverage file name
+    # is derived from the end bam not from bam_file
+    bam_file = os.path.realpath(dd.get_align_bam(data))
+    bam_name = os.path.basename(bam_file)
+    (bname, ext) = os.path.splitext(bam_name)
+    result_file = os.path.join(work_dir, bname + "_coverage_loess.txt.gz")
+    if not os.path.exists(result_file):
+        cmd = [rscript, coverage_r,
+               "--out-dir", work_dir,
+               "--bam", bam_file,
+               "--intervals", intervals]
+        try:
+            cmd_line = "export R_LIBS_USER=%s && %s && %s" % (utils.R_sitelib(env = "base"),
+                                                              utils.get_R_exports(env = "base"),
+                                                              " ".join([str(x) for x in cmd]))
+            do.run(cmd_line, "PureCN coverage")
+        except subprocess.CalledProcessError as msg:
+            logger.info("PureCN failed to calculate coverage")
+        logger.debug("Saved PureCN coverage files to " + result_file)
+    return result_file
+
+def create_normal_db(coverage_files_txt, snv_pon, out_dir, genome_build):
+    """create normal db
+       input: coverage files calculated by purecn for each sample
+              snv_pon - mutect2 SNV PON
+       output:
+              mapping_bias_hg38.rds
+              normalDB_hg38.rds
+    """
+    rscript = utils.Rscript_cmd("base")
+    normaldb_r = utils.R_package_script("PureCN", "extdata/NormalDB.R", env="base")
+    cmd = [rscript, normaldb_r,
+           "--out-dir", out_dir,
+           "--coverage-files", coverage_files_txt,
+           "--normal-panel" , snv_pon,
+           "--genome", genome_build,
+           "--force"]
+    try:
+        cmd_line = "export R_LIBS_USER=%s && %s && %s" % (utils.R_sitelib(env = "base"),
+                                                          utils.get_R_exports(env = "base"),
+                                                          " ".join([str(x) for x in cmd]))
+        do.run(cmd_line, "PureCN normalDB")
+    except subprocess.CalledProcessError as msg:
+        logger.info("PureCN failed to create a normal db")
+
+    return out_dir

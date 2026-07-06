@@ -59,6 +59,9 @@ https://gatkforums.broadinstitute.org/gatk/discussion/10061/using-genomicsdbimpo
                     vcfutils.bgzip_and_index(vrn_file, data["config"])
                 samplemap = _create_samplemap_file(vrn_files)
                 params += ["--sample-name-map", samplemap]
+                resources = config_utils.get_resources("GenomicsDBImport", data["config"])
+                if resources and resources.get("options", []):
+                    params += resources.get("options", [])
                 # For large inputs, reduce memory usage by batching
                 # https://github.com/bcbio/bcbio-nextgen/issues/2852
                 if len(vrn_files) > 200:
@@ -96,6 +99,8 @@ def _run_genotype_gvcfs_genomicsdb(genomics_db, region, out_file, data):
     if not utils.file_exists(out_file):
         with file_transaction(data, out_file) as tx_out_file:
             broad_runner = broad.runner_from_config(data["config"])
+            # see issue https://github.com/bcbio/bcbio-nextgen/issues/3263
+            # for why --genomicsdb-use-vcf-codec is necessary
             params = ["-T", "GenotypeGVCFs",
                       "--variant", "gendb://%s" % genomics_db,
                       "-R", dd.get_ref_file(data),

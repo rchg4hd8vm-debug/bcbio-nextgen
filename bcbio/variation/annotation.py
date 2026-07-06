@@ -46,7 +46,7 @@ def get_gatk_annotations(config, include_depth=True, include_baseqranksum=True,
     return anns
 
 def finalize_vcf(in_file, variantcaller, items):
-    """Perform cleanup and dbSNP annotation of the final VCF.
+    """Perform cleanup of the final VCF.
 
     - Adds contigs to header for bcftools compatibility
     - adds sample information for tumor/normal
@@ -58,11 +58,9 @@ def finalize_vcf(in_file, variantcaller, items):
         cls = [x for x in (contig_cl, header_cl) if x]
         if cls:
             post_cl = " | ".join(cls) + " | "
-        else:
-            post_cl = None
-        dbsnp_file = tz.get_in(("genome_resources", "variation", "dbsnp"), items[0])
-        if dbsnp_file:
-            out_file = _add_dbsnp(in_file, dbsnp_file, items[0], out_file, post_cl)
+            with file_transaction(out_file) as tx_out_file:
+                cmd = f"bcftools view {in_file} | {post_cl} bgzip -c > {tx_out_file}"
+                do.run(cmd, "Finalize vcf")
     if utils.file_exists(out_file):
         return vcfutils.bgzip_and_index(out_file, items[0]["config"])
     else:
@@ -100,6 +98,7 @@ def _add_vcf_header_sample_cl(in_file, items, base_file):
 
     Encode tumor/normal relationships in VCF header.
     Could also eventually handle more complicated pedigree information if useful.
+    returns a cmd
     """
     paired = vcfutils.get_paired(items)
     if paired:
@@ -109,8 +108,8 @@ def _add_vcf_header_sample_cl(in_file, items, base_file):
             toadd.append("##PEDIGREE=<Derived=%s,Original=%s>" % (paired.tumor_name, paired.normal_name))
         new_header = _update_header(in_file, base_file, toadd, _fix_generic_tn_names(paired))
         if vcfutils.vcf_has_variants(in_file):
-            cmd = "bcftools reheader -h {new_header} | bcftools view "
-            return cmd.format(**locals())
+            cmd = f"bcftools reheader -h {new_header} | bcftools view "
+            return cmd
 
 def _update_header(orig_vcf, base_file, new_lines, chrom_process_fn=None):
     """Fix header with additional lines and remapping of generic sample names.
@@ -132,45 +131,6 @@ def _update_header(orig_vcf, base_file, new_lines, chrom_process_fn=None):
             chrom_line = chrom_process_fn(chrom_line)
         out_handle.write(chrom_line)
     return new_header
-
-_DBSNP_TEMPLATE = """
-[[annotation]]
-file="%s"
-fields=["ID"]
-names=["rs_ids"]
-ops=["concat"]
-
-[[postannotation]]
-name="ID"
-fields=["rs_ids"]
-op="setid"
-type="String"
-
-[[postannotation]]
-fields=["rs_ids"]
-op="delete"
-"""
-
-def _add_dbsnp(orig_file, dbsnp_file, data, out_file=None, post_cl=None):
-    """Annotate a VCF file with dbSNP.
-
-    vcfanno has flexible matching for NON_REF gVCF positions, matching
-    at position and REF allele, matching ALT NON_REF as a wildcard.
-    """
-    orig_file = vcfutils.bgzip_and_index(orig_file, data["config"])
-    if out_file is None:
-        out_file = "%s-wdbsnp.vcf.gz" % utils.splitext_plus(orig_file)[0]
-    if not utils.file_uptodate(out_file, orig_file):
-        with file_transaction(data, out_file) as tx_out_file:
-            conf_file = os.path.join(os.path.dirname(out_file), "dbsnp.conf")
-            with open(conf_file, "w") as out_handle:
-                out_handle.write(_DBSNP_TEMPLATE % os.path.normpath(os.path.join(dd.get_work_dir(data), dbsnp_file)))
-            if not post_cl: post_cl = ""
-            cores = dd.get_num_cores(data)
-            cmd = ("vcfanno -p {cores} {conf_file} {orig_file} | {post_cl} "
-                   "bgzip -c > {tx_out_file}")
-            do.run(cmd.format(**locals()), "Annotate with dbSNP")
-    return vcfutils.bgzip_and_index(out_file, data["config"])
 
 def get_context_files(data):
     """Retrieve pre-installed annotation files for annotating genome context.

@@ -14,9 +14,7 @@ import six
 
 
 def make_bcbiornaseq_object(data):
-    """
-    load the initial bcb.rda object using bcbioRNASeq
-    """
+    """ load the initial bcb.rda object using bcbioRNASeq """
     if "bcbiornaseq" not in dd.get_tools_on(data):
         return data
     upload_dir = tz.get_in(("upload", "dir"), data)
@@ -28,25 +26,28 @@ def make_bcbiornaseq_object(data):
     r_file = os.path.join(report_dir, "load_bcbioRNAseq.R")
     with file_transaction(r_file) as tmp_file:
         memoize_write_file(loadstring, tmp_file)
-    rcmd = Rscript_cmd()
+    rcmd = Rscript_cmd(env = "rbcbiornaseq")
     with chdir(report_dir):
         do.run([rcmd, "--vanilla", r_file], "Loading bcbioRNASeq object.")
-        write_counts(os.path.join(report_dir, "data", "bcb.rda"), "gene")
+        # bcbiornaseq 0.3.44 writes to data/bcb.rds
+        write_counts(os.path.join(report_dir, "data", "bcb.rds"), "gene")
     loadstring = create_load_string(upload_dir, groups, organism, "transcript")
     r_file = os.path.join(report_dir, "load_transcript_bcbioRNAseq.R")
     with file_transaction(r_file) as tmp_file:
         memoize_write_file(loadstring, tmp_file)
-    rcmd = Rscript_cmd()
+    rcmd = Rscript_cmd(env = "rbcbiornaseq")
     with chdir(report_dir):
         do.run([rcmd, "--vanilla", r_file], "Loading transcript-level bcbioRNASeq object.")
-        write_counts(os.path.join(report_dir, "data-transcript", "bcb.rda"), "transcript")
-    make_quality_report(data)
-    return data
+        write_counts(os.path.join(report_dir, "data-transcript", "bcb.rds"), "transcript")
+    try:
+        make_quality_report(data)
+    except:
+        logger.error("bcbiornaseq error at quality report")
+    finally:
+        return data
 
 def make_quality_report(data):
-    """
-    create and render the bcbioRNASeq quality report
-    """
+    """ create and render the bcbioRNASeq quality report """
     MAX_SAMPLES = 100
     if "bcbiornaseq" not in dd.get_tools_on(data):
         return data
@@ -57,7 +58,7 @@ def make_quality_report(data):
     safe_makedir(report_dir)
     quality_rmd = os.path.join(report_dir, "quality_control.Rmd")
     quality_html = os.path.join(report_dir, "quality_control.html")
-    quality_rmd = rmarkdown_draft(quality_rmd, "quality_control", "bcbioRNASeq")
+    quality_rmd = rmarkdown_draft(quality_rmd, "01-quality-control", "bcbioRNASeq")
     if nsamples > MAX_SAMPLES and not groups:
         logger.warn(f"{nsamples} detected, disabling a few bcbioRNASeq plots which break "
                     f"with many samples. Setting `interesting_groups` would allow these plots "
@@ -91,7 +92,7 @@ def rmarkdown_draft(filename, template, package):
     draft_string = draft_template.substitute(
         filename=filename, template=template, package=package)
     report_dir = os.path.dirname(filename)
-    rcmd = Rscript_cmd()
+    rcmd = Rscript_cmd(env = "rbcbiornaseq")
     with chdir(report_dir):
         do.run([rcmd, "--vanilla", "-e", draft_string], "Creating bcbioRNASeq quality control template.")
         do.run(["sed", "-i", "s/YYYY-MM-DD\///g", filename], "Editing bcbioRNAseq quality control template.")
@@ -107,15 +108,13 @@ def render_rmarkdown_file(filename):
     render_string = render_template.substitute(
         filename=filename)
     report_dir = os.path.dirname(filename)
-    rcmd = Rscript_cmd()
+    rcmd = Rscript_cmd(env = "rbcbiornaseq")
     with chdir(report_dir):
         do.run([rcmd, "--vanilla", "-e", render_string], "Rendering bcbioRNASeq quality control report.")
     return filename
 
 def create_load_string(upload_dir, groups=None, organism=None, level="gene"):
-    """
-    create the code necessary to load the bcbioRNAseq object
-    """
+    """ create the code necessary to load the bcbioRNAseq object """
     libraryline = 'library(bcbioRNASeq)'
     load_template = Template(
         ('bcb <- bcbioRNASeq(uploadDir="$upload_dir",'
@@ -127,7 +126,7 @@ def create_load_string(upload_dir, groups=None, organism=None, level="gene"):
          'interestingGroups=$groups,'
          'level="$level",'
          'organism=NULL)'))
-    flatline = 'flat <- flatFiles(bcb)'
+    flatline = 'flat <- coerceToList(bcb)'
     if level == "gene":
         out_dir = '"data"'
     else:
@@ -146,9 +145,7 @@ def create_load_string(upload_dir, groups=None, organism=None, level="gene"):
     return ";\n".join([libraryline, load_bcbio, flatline, saveline])
 
 def write_counts(bcb, level="gene"):
-    """
-    pull counts and metadata out of the bcbioRNASeq object
-    """
+    """ pull counts and metadata out of the bcbioRNASeq object """
     date = dt.strftime(dt.now(), "%Y-%m-%d")
     out_dir = os.path.join(os.path.dirname(bcb), "..", "results", date, level, "counts")
     out_dir_string = _quotestring(out_dir)
@@ -157,15 +154,15 @@ def write_counts(bcb, level="gene"):
     if file_exists(out_file):
         return out_file
     bcb_string = _quotestring(bcb)
-    rcmd = Rscript_cmd()
+    rcmd = Rscript_cmd(env = "rbcbiornaseq")
     render_string = (
-            f'load({bcb_string});'
+            f'bcb<-readRDS({bcb_string});'
             f'date=format(Sys.time(), "%Y-%m-%d");'
             f'dir={out_dir_string};'
             f'library(tidyverse);'
             f'library(bcbioRNASeq);'
-            f'counts = bcbioRNASeq::counts(bcb) %>% as.data.frame() %>% round() %>% tibble::rownames_to_column("gene");'
-            f'metadata = colData(bcb) %>% as.data.frame() %>% tibble::rownames_to_column("sample");'
+            f'counts = bcbioRNASeq::counts(bcb) |> as.data.frame() |> round() |> tibble::rownames_to_column("gene");'
+            f'metadata = colData(bcb) |> as.data.frame() |> tibble::rownames_to_column("sample");'
             f'readr::write_csv(counts, file.path(dir, "counts.csv.gz"));'
             f'readr::write_csv(metadata, file.path(dir, "metadata.csv.gz"));')
     do.run([rcmd, "--vanilla", "-e", render_string], f"Writing counts table to {out_file}.")

@@ -217,25 +217,23 @@ def _parse_metrics(metrics):
     return out
 
 def _detect_duplicates(bam_file, out_dir, data):
-    """
-    count duplicate percentage
-    """
+    """ count duplicate percentage """
     out_file = os.path.join(out_dir, "dup_metrics.txt")
     if not utils.file_exists(out_file):
         dup_align_bam = postalign.dedup_bam(bam_file, data)
         logger.info("Detecting duplicates in %s." % dup_align_bam)
-        dup_count = readstats.number_of_mapped_reads(data, dup_align_bam, keep_dups=False)
+        not_dup_count = readstats.number_of_mapped_reads(data, dup_align_bam, keep_dups=False)
         tot_count = readstats.number_of_mapped_reads(data, dup_align_bam, keep_dups=True)
         with file_transaction(data, out_file) as tx_out_file:
             with open(tx_out_file, "w") as out_handle:
-                out_handle.write("%s\n%s\n" % (dup_count, tot_count))
+                out_handle.write("%s\n%s\n" % (not_dup_count, tot_count))
     with open(out_file) as in_handle:
-        dupes = float(next(in_handle).strip())
+        not_dupes = float(next(in_handle).strip())
         total = float(next(in_handle).strip())
     if total == 0:
         rate = "NA"
     else:
-        rate = dupes / total
+        rate = 1 - not_dupes / total
     return {"Duplication Rate of Mapped": rate}
 
 def _transform_browser_coor(rRNA_interval, rRNA_coor):
@@ -252,7 +250,7 @@ def _transform_browser_coor(rRNA_interval, rRNA_coor):
 def _detect_rRNA(data, out_dir):
     out_file = os.path.join(out_dir, "rRNA_metrics.txt")
     if not utils.file_exists(out_file):
-        gtf_file = dd.get_gtf_file(data)
+        gtf_file = dd.get_transcriptome_gtf(data, default=dd.get_gtf_file(data))
         quant = tz.get_in(["quant", "tsv"], data)
         if not quant:
             salmon_dir = dd.get_salmon_dir(data)
@@ -320,7 +318,8 @@ def run_rnaseq(bam_file, data, out_dir):
     """
     strandedness = {"firststrand": "strand-specific-forward",
                     "secondstrand": "strand-specific-reverse",
-                    "unstranded": "non-strand-specific"}
+                    "unstranded": "non-strand-specific",
+                    "auto": "non-strand-specific"}
 
     # Qualimap results should be saved to a directory named after sample.
     # MultiQC (for parsing additional data) picks the sample name after the dir as follows:
@@ -329,7 +328,7 @@ def run_rnaseq(bam_file, data, out_dir):
     results_file = os.path.join(results_dir, "rnaseq_qc_results.txt")
     report_file = os.path.join(results_dir, "qualimapReport.html")
     config = data["config"]
-    gtf_file = dd.get_gtf_file(data)
+    gtf_file = dd.get_transcriptome_gtf(data, default=dd.get_gtf_file(data))
     library = strandedness[dd.get_strandedness(data)]
 
     # don't run qualimap on the full bam by default
@@ -392,14 +391,9 @@ def _find_qualimap_secondary_files(results_dir, base_file):
         is_dup = (os.path.basename(x) == os.path.basename(base_file) and
                   os.path.getsize(x) == os.path.getsize(base_file))
         return not is_dup
-    def is_problem_file(x):
-        """Problematic files with characters that make some CWL runners unhappy.
-        """
-        return x.find("(") >= 0 or x.find(")") >= 0 or x.find(" ") >= 0
-    return list(filter(lambda x: not is_problem_file(x),
-                       filter(not_dup,
+    return list(filter(not_dup,
                               glob.glob(os.path.join(results_dir, 'qualimapReport.html')) +
                               glob.glob(os.path.join(results_dir, '*.txt')) +
                               glob.glob(os.path.join(results_dir, "css", "*")) +
                               glob.glob(os.path.join(results_dir, "raw_data_qualimapReport", "*")) +
-                              glob.glob(os.path.join(results_dir, "images_qualimapReport", "*")))))
+                              glob.glob(os.path.join(results_dir, "images_qualimapReport", "*"))))

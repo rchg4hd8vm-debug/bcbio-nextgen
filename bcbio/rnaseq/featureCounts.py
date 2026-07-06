@@ -1,6 +1,8 @@
 import os
 import shutil
 import bcbio.bam as bam
+import toolz as tz
+
 from bcbio.utils import (file_exists, safe_makedir, append_stem)
 from bcbio.pipeline import config_utils
 from bcbio.bam import is_paired
@@ -23,7 +25,7 @@ def count(data):
     if dd.get_aligner(data) == "star":
         out_dir = os.path.join(out_dir, "%s_%s" % (dd.get_sample_name(data), dd.get_aligner(data)))
     sorted_bam = bam.sort(in_bam, dd.get_config(data), order="queryname", out_dir=safe_makedir(out_dir))
-    gtf_file = dd.get_gtf_file(data)
+    gtf_file = dd.get_transcriptome_gtf(data, default=dd.get_gtf_file(data))
     work_dir = dd.get_work_dir(data)
     out_dir = os.path.join(work_dir, "htseq-count")
     safe_makedir(out_dir)
@@ -41,6 +43,12 @@ def count(data):
     cmd = ("{featureCounts} -a {gtf_file} -o {tx_count_file} -s {strand_flag} "
            "{paired_flag} {filtered_bam}")
 
+    resources = config_utils.get_resources("featureCounts", data["config"])
+    if resources:
+        options = resources.get("options")
+        if options:
+            cmd += " %s" % " ".join([str(x) for x in options])
+
     message = ("Count reads in {tx_count_file} mapping to {gtf_file} using "
                "featureCounts")
     with file_transaction(data, [count_file, summary_file]) as tx_files:
@@ -53,6 +61,65 @@ def count(data):
     shutil.move(fixed_summary_file, summary_file)
 
     return count_file
+
+def chipseq_count(data):
+    """
+    count reads mapping to ChIP/ATAC consensus peaks with featureCounts
+    """
+    method = dd.get_chip_method(data)
+    if method == "chip":
+        in_bam = dd.get_work_bam(data)
+    elif method == "atac":
+        if bam.is_paired(dd.get_work_bam(data)):
+            in_bam = tz.get_in(("atac", "align", "NF"), data)
+        else:
+            in_bam = tz.get_in(("atac", "align", "full"), data)
+    out_dir = os.path.join(dd.get_work_dir(data), "align", dd.get_sample_name(data))
+    sorted_bam = bam.sort(in_bam, dd.get_config(data),
+                          order="queryname", out_dir=safe_makedir(out_dir))
+    consensus_file = tz.get_in(("peaks_files", "consensus", "main"), data)
+    if not consensus_file:
+        return [[data]]
+    saf_file = os.path.splitext(consensus_file)[0] + ".saf"
+    work_dir = dd.get_work_dir(data)
+    out_dir = os.path.join(work_dir, "consensus")
+    safe_makedir(out_dir)
+    count_file = os.path.join(out_dir, dd.get_sample_name(data)) + ".counts"
+    summary_file = os.path.join(out_dir, dd.get_sample_name(data)) + ".counts.summary"
+    if file_exists(count_file) and _is_fixed_count_file(count_file):
+        if method == "atac":
+            if bam.is_paired(dd.get_work_bam(data)):
+                data = tz.assoc_in(data, ("peak_counts", "NF"), count_file)
+            else:
+                data = tz.assoc_in(data, ("peak_counts", "full"), count_file)
+        elif method == "chip":
+            data = tz.assoc_in(data, ("peak_counts"), count_file)
+        return [[data]]
+    featureCounts = config_utils.get_program("featureCounts", dd.get_config(data))
+    paired_flag = _paired_flag(in_bam)
+    strand_flag = _strand_flag(data)
+
+    cmd = ("{featureCounts} -F SAF -a {saf_file} -o {tx_count_file} -s {strand_flag} "
+           "{paired_flag} {sorted_bam}")
+
+    message = ("Count reads in {sorted_bam} overlapping {saf_file} using "
+               "featureCounts.")
+    with file_transaction(data, [count_file, summary_file]) as tx_files:
+        tx_count_file, tx_summary_file = tx_files
+        do.run(cmd.format(**locals()), message.format(**locals()))
+    fixed_count_file = _format_count_file(count_file, data)
+    fixed_summary_file = _change_sample_name(
+        summary_file, dd.get_sample_name(data), data=data)
+    shutil.move(fixed_count_file, count_file)
+    shutil.move(fixed_summary_file, summary_file)
+    if method == "atac":
+        if bam.is_paired(dd.get_work_bam(data)):
+            data = tz.assoc_in(data, ("peak_counts", "NF"), count_file)
+        else:
+            data = tz.assoc_in(data, ("peak_counts", "full"), count_file)
+    elif method == "chip":
+        data = tz.assoc_in(data, ("peak_counts"), count_file)
+    return [[data]]
 
 def _change_sample_name(in_file, sample_name, data=None):
     """Fix name in feature counts log file to get the same
@@ -97,7 +164,8 @@ def _strand_flag(data):
     """
     strand_flag = {"unstranded": "0",
                    "firststrand": "2",
-                   "secondstrand": "1"}
+                   "secondstrand": "1",
+                   "auto": "0"}
     stranded = dd.get_strandedness(data)
 
     assert stranded in strand_flag, ("%s is not a valid strandedness value. "

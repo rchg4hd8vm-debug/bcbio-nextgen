@@ -13,6 +13,7 @@ from bcbio.pipeline import config_utils
 from bcbio.pipeline.shared import subset_variant_regions
 from bcbio.pipeline import datadict as dd
 from bcbio.variation import annotation, bamprep, bedutils, ploidy, vcfutils
+from bcbio.provenance import do
 
 def standard_cl_params(items):
     """Shared command line parameters for GATK programs.
@@ -58,10 +59,7 @@ def _shared_gatk_call_prep(align_bams, items, ref_file, region, out_file, num_co
     variant_regions = bedutils.population_variant_regions(items)
     region = subset_variant_regions(variant_regions, region, out_file, items)
     if region:
-        if gatk_type == "gatk4":
-            params += ["-L", bamprep.region_to_gatk(region), "--interval-set-rule", "INTERSECTION"]
-        else:
-            params += ["-L", bamprep.region_to_gatk(region), "--interval_set_rule", "INTERSECTION"]
+        params += ["-L", bamprep.region_to_gatk(region), "-isr", "INTERSECTION"]
     params += standard_cl_params(items)
     return broad_runner, params
 
@@ -97,8 +95,11 @@ def _joint_calling(items):
     return jointcaller
 
 def _use_spark(num_cores, gatk_type, items, opts):
-    return ((len(items) == 1 and num_cores > 1 and gatk_type == "gatk4") or
-            "--spark-master" in opts)
+    data = items[0]
+    use_spark = False
+    if dd.get_analysis(data).lower() != "rna-seq":
+        use_spark = (len(items) == 1 and num_cores > 1 and gatk_type == "gatk4") or "--spark-master" in opts
+    return use_spark
 
 def haplotype_caller(align_bams, items, ref_file, assoc_files,
                        region=None, out_file=None):
@@ -208,3 +209,60 @@ def _supports_avx():
             for line in in_handle:
                 if line.startswith("flags") and line.find("avx") > 0:
                     return True
+
+def collect_artifact_metrics(data):
+    """Run CollectSequencingArtifacts to collect pre-adapter ligation artifact metrics
+    https://gatk.broadinstitute.org/hc/en-us/articles/360037429491-CollectSequencingArtifactMetrics-Picard-
+    use picard wrapper rather than gatk - works for gatk4 and gatk3 projects
+    refactor - move to broad/picardrun
+    """
+    OUT_SUFFIXES = [".bait_bias_detail_metrics", ".error_summary_metrics",
+                    ".pre_adapter_detail_metrics", ".pre_adapter_summary_metrics"]
+    picard = broad.runner_from_path("picard", dd.get_config(data))
+    ref_file = dd.get_ref_file(data)
+    bam_file = dd.get_work_bam(data)
+    if not bam_file:
+        return None
+    if "collectsequencingartifacts" in dd.get_tools_off(data):
+        return None
+    out_dir = os.path.join(dd.get_work_dir(data), "metrics", "artifact", dd.get_sample_name(data))
+    utils.safe_makedir(out_dir)
+    out_base = os.path.join(out_dir, dd.get_sample_name(data))
+    out_files = [out_base + x for x in OUT_SUFFIXES]
+    if all([utils.file_exists(x) for x in out_files]):
+        return out_files
+    with file_transaction(data, out_dir) as tx_out_dir:
+        utils.safe_makedir(tx_out_dir)
+        out_base = os.path.join(tx_out_dir, dd.get_sample_name(data))
+        params = [("-REFERENCE_SEQUENCE", ref_file),
+                  ("-INPUT", bam_file),
+                  ("-OUTPUT", out_base)]
+        # picard runner sets VALIDATION_STRINGENCY
+        picard.run("CollectSequencingArtifactMetrics", params)
+    return out_files
+
+def collect_oxog_metrics(data):
+    """ extracts 8-oxoguanine (OxoG) artifact metrics from CollectSequencingArtifacts
+    output so we don't have to run CollectOxoGMetrics.
+    """
+    input_base = os.path.join(dd.get_work_dir(data), "metrics", "artifact", dd.get_sample_name(data),
+                              dd.get_sample_name(data))
+    if not utils.file_exists(input_base + ".pre_adapter_detail_metrics"):
+        return None
+    OUT_SUFFIXES = [".oxog_metrics"]
+    picard = broad.runner_from_path("picard", dd.get_config(data))
+    out_dir = os.path.join(dd.get_work_dir(data), "metrics", "oxog", dd.get_sample_name(data))
+    utils.safe_makedir(out_dir)
+    ref_file = dd.get_ref_file(data)
+    out_base = os.path.join(out_dir, dd.get_sample_name(data))
+    out_files = [out_base + x for x in OUT_SUFFIXES]
+    if all([utils.file_exists(x) for x in out_files]):
+        return out_files
+    with file_transaction(data, out_dir) as tx_out_dir:
+        utils.safe_makedir(tx_out_dir)
+        out_base = os.path.join(tx_out_dir, dd.get_sample_name(data))
+        params = [("--INPUT_BASE", input_base),
+                  ("--OUTPUT_BASE", out_base),
+                  ("--REFERENCE_SEQUENCE", ref_file)]
+        picard.run("ConvertSequencingArtifactToOxoG", params)
+    return out_files
